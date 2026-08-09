@@ -1,0 +1,114 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-11-09 21:49:44.505038",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "sequence",
+  "access_object",
+  "label",
+  "object_type",
+  "can_view",
+  "can_approve",
+  "can_export",
+  "can_create",
+  "can_edit",
+  "condition_expression",
+  "data_filters_json",
+  "active"
+ ],
+ "fields": [
+  {
+   "fieldname": "sequence",
+   "fieldtype": "Int",
+   "label": "Sequence"
+  },
+  {
+   "fieldname": "access_object",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Access Object",
+   "options": "Access Object Registry",
+   "reqd": 1
+  },
+  {
+   "fetch_from": "access_object.object_type",
+   "fieldname": "object_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Object Type",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "can_view",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Can View"
+  },
+  {
+   "default": "0",
+   "fieldname": "can_approve",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Can Approve"
+  },
+  {
+   "default": "0",
+   "fieldname": "can_export",
+   "fieldtype": "Check",
+   "label": "Can Export"
+  },
+  {
+   "default": "0",
+   "fieldname": "can_create",
+   "fieldtype": "Check",
+   "label": "Can Create"
+  },
+  {
+   "default": "0",
+   "fieldname": "can_edit",
+   "fieldtype": "Check",
+   "label": "Can Edit"
+  },
+  {
+   "fieldname": "condition_expression",
+   "fieldtype": "Code",
+   "label": "Condition Expression"
+  },
+  {
+   "fieldname": "data_filters_json",
+   "fieldtype": "Code",
+   "label": "Data Filters JSON"
+  },
+  {
+   "default": "1",
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "label": "Active"
+  },
+  {
+   "fetch_from": "access_object.label",
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2025-11-11 17:22:54.244502",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "Access Profile Line",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

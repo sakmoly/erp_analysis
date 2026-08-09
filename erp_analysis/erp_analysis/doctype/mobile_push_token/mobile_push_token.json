@@ -1,0 +1,69 @@
+{
+ "doctype": "DocType",
+ "name": "Mobile Push Token",
+ "module": "ERP Analysis",
+ "custom": 0,
+ "istable": 0,
+ "editable_grid": 0,
+ "track_changes": 1,
+ "engine": "InnoDB",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  },
+  {
+   "role": "Administrator",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  }
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "label": "User",
+   "fieldtype": "Link",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "expo_token",
+   "label": "Expo Push Token",
+   "fieldtype": "Data",
+   "reqd": 1,
+   "unique": 1,
+   "length": 255
+  },
+  {
+   "fieldname": "platform",
+   "label": "Platform",
+   "fieldtype": "Select",
+   "options": "ios\nandroid\nweb",
+   "default": "ios"
+  },
+  {
+   "fieldname": "company",
+   "label": "Company",
+   "fieldtype": "Link",
+   "options": "Company"
+  },
+  {
+   "fieldname": "territory",
+   "label": "Territory",
+   "fieldtype": "Link",
+   "options": "Territory"
+  },
+  {
+   "fieldname": "last_seen",
+   "label": "Last Seen",
+   "fieldtype": "Datetime",
+   "read_only": 1
+  }
+ ]
+}
+

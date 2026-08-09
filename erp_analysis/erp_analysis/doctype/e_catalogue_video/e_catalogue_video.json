@@ -1,0 +1,61 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-11-15 18:29:52.446763",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "video_type",
+  "youtube_url",
+  "local_video",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title"
+  },
+  {
+   "default": "YouTube",
+   "fieldname": "video_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Video Type",
+   "options": "YouTube\nLocal",
+   "reqd": 1
+  },
+  {
+   "fieldname": "youtube_url",
+   "fieldtype": "Data",
+   "label": "YouTube URL"
+  },
+  {
+   "fieldname": "local_video",
+   "fieldtype": "Attach",
+   "label": "Local Video (MP4)"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2025-11-15 18:29:52.446763",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "E Catalogue Video",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

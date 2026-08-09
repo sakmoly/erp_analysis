@@ -1,0 +1,16 @@
+[project]
+name = "erp_analysis"
+authors = [
+    { name = "Printechs", email = "support@printechs.com"}
+]
+description = "Mobile Business Analysis APIs for ERPNext"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    # "frappe~=15.0.0"
+]
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"

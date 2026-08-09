@@ -1,0 +1,158 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "autoname": "AP-.{user}.-.#####",
+ "creation": "2025-11-09 21:49:44.906456",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_scope",
+  "user",
+  "company",
+  "territories",
+  "approve_territories",
+  "branch",
+  "role_profile",
+  "enabled",
+  "sec_overrides",
+  "allow_view_all_sales",
+  "allow_view_all_stock",
+  "allow_all_receivable",
+  "sec_rules",
+  "access_rules"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_scope",
+   "fieldtype": "Section Break",
+   "label": "Scope"
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "User",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "description": "View / analytics scope (Sales, GP, executive, receivables). Returned as view_territories. Overridden per module by the checkboxes below.",
+   "fieldname": "territories",
+   "fieldtype": "Table MultiSelect",
+   "label": "View Territories",
+   "options": "Access Profile Territory",
+   "reqd": 1
+  },
+  {
+   "description": "Approvals inbox + approve/reject only. If empty, mobile/server fall back to Branch. Not overridden by View All flags.",
+   "fieldname": "approve_territories",
+   "fieldtype": "Table MultiSelect",
+   "label": "Approve Territories",
+   "options": "Access Profile Territory"
+  },
+  {
+   "description": "Legacy site default; used as approve_territories fallback when Approve Territories is empty.",
+   "fieldname": "branch",
+   "fieldtype": "Link",
+   "label": "Branch",
+   "options": "Branch"
+  },
+  {
+   "fieldname": "role_profile",
+   "fieldtype": "Link",
+   "label": "Role Profile",
+   "options": "Role Profile"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled",
+   "reqd": 1
+  },
+  {
+   "fieldname": "sec_overrides",
+   "fieldtype": "Section Break",
+   "label": "Company-wide View Overrides"
+  },
+  {
+   "default": "0",
+   "description": "If checked, Sales / GP / executive / sales performance ignore View Territories (company-wide).",
+   "fieldname": "allow_view_all_sales",
+   "fieldtype": "Check",
+   "label": "Allow View All Sales"
+  },
+  {
+   "default": "0",
+   "description": "If checked, Inventory / stock APIs ignore View Territories (all warehouses).",
+   "fieldname": "allow_view_all_stock",
+   "fieldtype": "Check",
+   "label": "Allow View All Stock"
+  },
+  {
+   "default": "0",
+   "description": "If checked, Receivables APIs ignore View Territories (company-wide AR).",
+   "fieldname": "allow_all_receivable",
+   "fieldtype": "Check",
+   "label": "Allow All Receivable"
+  },
+  {
+   "fieldname": "sec_rules",
+   "fieldtype": "Section Break",
+   "label": "Access Rules"
+  },
+  {
+   "fieldname": "access_rules",
+   "fieldtype": "Table",
+   "label": "Access Rules",
+   "options": "Access Profile Line"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2025-11-12 18:46:55.621137",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "Access Profile",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Mobile Dashboard Admin",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -1,0 +1,276 @@
+import frappe
+
+from erp_analysis import __version__ as APP_VERSION
+
+
+@frappe.whitelist(allow_guest=True)
+def health():
+	return {
+		"ok": True,
+		"status": "ok",
+		"version": APP_VERSION,
+		"message": "erp_analysis is available",
+	}
+
+
+@frappe.whitelist()
+def get_mobile_config(**kwargs):
+	from erp_analysis.utils.rpc import clean_kwargs
+	from erp_analysis.mobile_config import get_mobile_config_cached
+
+	clean_kwargs(kwargs)
+	return get_mobile_config_cached()
+
+
+@frappe.whitelist()
+def get_my_access(user: str | None = None, company: str | None = None, **kwargs):
+	from erp_analysis.utils.rpc import clean_kwargs
+
+	clean_kwargs(kwargs)
+	return _get_my_access(user=user, company=company)
+
+
+@frappe.whitelist()
+def clear_my_access_cache(user=None, **kwargs):
+	from erp_analysis.utils.rpc import clean_kwargs
+
+	clean_kwargs(kwargs)
+	from erp_analysis.permissions.access_profile import clear_my_access_cache as _impl
+
+	return _impl(user=user)
+
+
+@frappe.whitelist(methods=["POST"])
+def store_push_token(
+	expo_token: str | None = None,
+	platform: str | None = None,
+	territory: str | None = None,
+	company: str | None = None,
+	user: str | None = None,
+	**kwargs,
+):
+	from erp_analysis.utils.rpc import clean_kwargs
+
+	payload = clean_kwargs(dict(kwargs))
+	expo_token = expo_token or payload.get("expo_token")
+	platform = platform or payload.get("platform")
+	territory = territory or payload.get("territory")
+	company = company or payload.get("company")
+	user = user or payload.get("user")
+	return _store_push_token(
+		expo_token=expo_token,
+		platform=platform,
+		territory=territory,
+		company=company,
+		user=user,
+	)
+
+
+def _get_access_profile_by_user(user, company_filter=None):
+	import os
+	import socket
+
+	try:
+		meta_ap = frappe.get_meta("Access Profile")
+	except Exception:
+		return None
+
+	candidate_fields: list[str] = []
+	try:
+		cols = frappe.db.sql("SHOW COLUMNS FROM `tabAccess Profile`", as_dict=True)
+		existing_cols = {c["Field"] for c in cols}
+	except Exception:
+		existing_cols = set()
+
+	for fieldname in ("user", "user_id", "owner"):
+		if fieldname in existing_cols:
+			candidate_fields.append(fieldname)
+
+	for df in meta_ap.fields:
+		if getattr(df, "options", None) == "User":
+			if df.fieldname in existing_cols and df.fieldname not in candidate_fields:
+				candidate_fields.append(df.fieldname)
+
+	if not candidate_fields:
+		return None
+
+	for fieldname in candidate_fields:
+		filters = {fieldname: user}
+		if company_filter:
+			filters["company"] = company_filter
+		profile = frappe.db.get_value(
+			"Access Profile",
+			filters,
+			["name", "company", "branch"],
+			as_dict=True,
+		)
+		if profile:
+			if fieldname != "user":
+				try:
+					host = socket.gethostname()
+					pid = os.getpid()
+					frappe.log_error(
+						message=(
+							f"Access Profile lookup used fallback column '{fieldname}' "
+							f"for user '{user}' on {host} (pid {pid})"
+						),
+						title="Access Profile Fallback Lookup",
+					)
+				except Exception:
+					pass
+			return profile
+	return None
+
+
+def _get_my_access(user: str | None = None, company: str | None = None):
+	"""Return Access Profile scope + object permissions for the logged-in user."""
+	if not user:
+		user = frappe.session.user
+
+	profile = _get_access_profile_by_user(user, company_filter=company)
+	if not profile:
+		return {"scope": {}, "profiles": []}
+
+	from erp_analysis.permissions.access_profile import (
+		get_approve_territories,
+		get_view_overrides,
+		get_view_territories,
+	)
+
+	view_territories = get_view_territories(user=user, company=profile.company, expand=False) or []
+	approve_territories = get_approve_territories(
+		user=user, company=profile.company, expand=False
+	)
+	# Profile users always get a list (possibly empty / branch fallback)
+	if approve_territories is None:
+		approve_territories = []
+	overrides = get_view_overrides(user, profile.company)
+
+	legacy_territory = None
+	try:
+		meta = frappe.get_meta("Access Profile")
+		if meta.has_field("territory"):
+			legacy_territory = frappe.db.get_value("Access Profile", profile.name, "territory")
+	except Exception:
+		legacy_territory = None
+
+	primary_territory = view_territories[0] if view_territories else legacy_territory
+
+	scope = {
+		"user": user,
+		"company": profile.company,
+		"branch": profile.branch,
+		"territory": primary_territory,
+		# Contract: territories aliases view_territories (backward compatible)
+		"territories": list(view_territories),
+		"view_territories": list(view_territories),
+		"approve_territories": list(approve_territories),
+		"allow_view_all_sales": overrides["allow_view_all_sales"],
+		"allow_view_all_stock": overrides["allow_view_all_stock"],
+		"allow_all_receivable": overrides["allow_all_receivable"],
+	}
+
+	try:
+		meta_line = frappe.get_meta("Access Profile Line")
+	except Exception:
+		meta_line = None
+
+	desired_fields = [
+		"access_object",
+		"object_type",
+		"label",
+		"can_view",
+		"can_export",
+		"can_create",
+		"can_edit",
+		"active",
+		"sequence",
+	]
+	fetch_fields = [f for f in desired_fields if meta_line and meta_line.has_field(f)]
+	if not fetch_fields:
+		fetch_fields = ["access_object", "label"]
+
+	order_by = "sequence" if (meta_line and meta_line.has_field("sequence")) else None
+
+	lines = frappe.db.get_all(
+		"Access Profile Line",
+		filters={
+			"parent": profile.name,
+			"parenttype": "Access Profile",
+			"parentfield": "access_rules",
+		},
+		fields=fetch_fields,
+		order_by=order_by,
+	)
+
+	objects = []
+	for row in lines:
+		objects.append(
+			{
+				"object_key": row.get("access_object") or row.get("object_key"),
+				"object_type": row.get("object_type"),
+				"label": row.get("label"),
+				"can_view": bool(row.get("can_view")) if "can_view" in row else False,
+				"can_export": bool(row.get("can_export")) if "can_export" in row else False,
+				"can_create": bool(row.get("can_create")) if "can_create" in row else False,
+				"can_edit": bool(row.get("can_edit")) if "can_edit" in row else False,
+				"active": bool(row.get("active")) if "active" in row else True,
+			}
+		)
+
+	return {"scope": scope, "profiles": objects}
+
+
+def _store_push_token(
+	expo_token: str,
+	platform: str | None = None,
+	territory: str | None = None,
+	company: str | None = None,
+	user: str | None = None,
+):
+	"""Persist / refresh Expo push tokens for the logged-in user."""
+	if not expo_token:
+		frappe.throw("expo_token is required")
+
+	if not user or user == "Guest":
+		user = frappe.session.user
+	if not user or user == "Guest":
+		frappe.throw("Authentication required")
+
+	platform_normalized = (platform or "").lower() or "ios"
+
+	name = frappe.db.get_value("Mobile Push Token", {"expo_token": expo_token}, "name")
+	if name:
+		doc = frappe.get_doc("Mobile Push Token", name)
+		doc.user = user
+		doc.platform = platform_normalized
+		if territory:
+			doc.territory = territory
+		if company:
+			doc.company = company
+		doc.last_seen = frappe.utils.now_datetime()
+		doc.flags.ignore_mandatory = True
+		doc.save(ignore_permissions=True)
+	else:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Mobile Push Token",
+				"user": user,
+				"expo_token": expo_token,
+				"platform": platform_normalized,
+				"territory": territory,
+				"company": company,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+
+	frappe.db.commit()
+	return {"ok": True, "name": doc.name}
+
+
+
+
+
+
+
+

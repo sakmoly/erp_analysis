@@ -1,0 +1,280 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-08-05 15:35:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_modules",
+  "module_sales",
+  "module_receivables",
+  "module_inventory",
+  "module_approvals",
+  "column_break_modules",
+  "module_catalogue",
+  "module_push",
+  "module_settings",
+  "sec_phase3_modules",
+  "module_executive",
+  "module_collection",
+  "module_sales_performance",
+  "module_sales_orders",
+  "column_break_phase3_modules",
+  "module_payables",
+  "module_purchase",
+  "module_customer_360",
+  "module_profitability",
+  "module_exceptions",
+  "module_approval_analytics",
+  "sec_dimensions",
+  "dimension_company",
+  "dimension_territory",
+  "dimension_warehouse",
+  "dimension_brand",
+  "column_break_dimensions",
+  "dimension_division",
+  "dimension_department",
+  "dimension_cost_center",
+  "dimension_branch",
+  "sec_apis",
+  "disabled_api_methods",
+  "sec_advanced",
+  "dashboards_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_modules",
+   "fieldtype": "Section Break",
+   "label": "Modules"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_sales",
+   "fieldtype": "Check",
+   "label": "Sales"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_receivables",
+   "fieldtype": "Check",
+   "label": "Receivables"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_inventory",
+   "fieldtype": "Check",
+   "label": "Inventory"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_approvals",
+   "fieldtype": "Check",
+   "label": "Approvals"
+  },
+  {
+   "fieldname": "column_break_modules",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_catalogue",
+   "fieldtype": "Check",
+   "label": "Catalogue"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_push",
+   "fieldtype": "Check",
+   "label": "Push Notifications"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_settings",
+   "fieldtype": "Check",
+   "label": "Settings"
+  },
+  {
+   "fieldname": "sec_phase3_modules",
+   "fieldtype": "Section Break",
+   "label": "Phase 3 Modules"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_executive",
+   "fieldtype": "Check",
+   "label": "Executive Dashboard"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_collection",
+   "fieldtype": "Check",
+   "label": "Collection"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_sales_performance",
+   "fieldtype": "Check",
+   "label": "Sales Performance"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_sales_orders",
+   "fieldtype": "Check",
+   "label": "Sales Orders"
+  },
+  {
+   "fieldname": "column_break_phase3_modules",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_payables",
+   "fieldtype": "Check",
+   "label": "Payables"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_purchase",
+   "fieldtype": "Check",
+   "label": "Purchase"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_customer_360",
+   "fieldtype": "Check",
+   "label": "Customer 360"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_profitability",
+   "fieldtype": "Check",
+   "label": "Profitability"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_exceptions",
+   "fieldtype": "Check",
+   "label": "Exceptions"
+  },
+  {
+   "default": "1",
+   "fieldname": "module_approval_analytics",
+   "fieldtype": "Check",
+   "label": "Approval Analytics"
+  },
+  {
+   "fieldname": "sec_dimensions",
+   "fieldtype": "Section Break",
+   "label": "Dimensions"
+  },
+  {
+   "default": "1",
+   "fieldname": "dimension_company",
+   "fieldtype": "Check",
+   "label": "Company"
+  },
+  {
+   "default": "1",
+   "fieldname": "dimension_territory",
+   "fieldtype": "Check",
+   "label": "Territory"
+  },
+  {
+   "default": "1",
+   "fieldname": "dimension_warehouse",
+   "fieldtype": "Check",
+   "label": "Warehouse"
+  },
+  {
+   "default": "1",
+   "fieldname": "dimension_brand",
+   "fieldtype": "Check",
+   "label": "Brand"
+  },
+  {
+   "fieldname": "column_break_dimensions",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "dimension_division",
+   "fieldtype": "Check",
+   "label": "Division"
+  },
+  {
+   "default": "1",
+   "fieldname": "dimension_department",
+   "fieldtype": "Check",
+   "label": "Department"
+  },
+  {
+   "default": "0",
+   "fieldname": "dimension_cost_center",
+   "fieldtype": "Check",
+   "label": "Cost Center"
+  },
+  {
+   "default": "1",
+   "fieldname": "dimension_branch",
+   "fieldtype": "Check",
+   "label": "Branch"
+  },
+  {
+   "fieldname": "sec_apis",
+   "fieldtype": "Section Break",
+   "label": "Disabled API Methods"
+  },
+  {
+   "description": "Comma or newline separated Python method names to skip on mobile, e.g. get_inventory_trends, get_territory_receivables",
+   "fieldname": "disabled_api_methods",
+   "fieldtype": "Small Text",
+   "label": "Disabled API Methods"
+  },
+  {
+   "fieldname": "sec_advanced",
+   "fieldtype": "Section Break",
+   "label": "Advanced"
+  },
+  {
+   "description": "Optional JSON array to override default home dashboards/widgets.",
+   "fieldname": "dashboards_json",
+   "fieldtype": "Code",
+   "label": "Dashboards JSON",
+   "options": "JSON"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-05 15:35:00.000000",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "Mobile App Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "Mobile Dashboard Admin",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

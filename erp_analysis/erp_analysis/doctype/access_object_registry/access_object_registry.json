@@ -1,0 +1,84 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "autoname": "AO-.#####",
+ "creation": "2025-11-09 21:49:43.788310",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "object_type",
+  "object_key",
+  "label",
+  "is_active"
+ ],
+ "fields": [
+  {
+   "fieldname": "object_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Object Type",
+   "options": "Module\nMenu\nDashboard\nAPI",
+   "reqd": 1
+  },
+  {
+   "fieldname": "object_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Object Key",
+   "reqd": 1
+  },
+  {
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Active",
+   "reqd": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2025-11-12 18:39:56.919201",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "Access Object Registry",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Mobile Dashboard Admin",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
