@@ -13,6 +13,8 @@ from erp_analysis.permissions.access_profile import (
 )
 from frappe.model.meta import get_meta
 
+from erp_analysis.utils.schema import has_column, sql_select
+
 OBJECT_KEY_BY_DOCTYPE = {
     "Sales Invoice": "erp_analysis.approvals.sales_invoice",
     "Delivery Note": "erp_analysis.approvals.delivery_note",
@@ -324,23 +326,35 @@ def get_all_approvals(
     approvals: List[Dict[str, Any]] = []
 
     if "Sales Invoice" in wanted_doctypes and _check("erp_analysis.approvals.sales_invoice"):
-        approvals.extend(
-            _fetch_sales_invoices(
-                from_date, to_date, company_filter, territory_filters, limit
+        try:
+            approvals.extend(
+                _fetch_sales_invoices(
+                    from_date, to_date, company_filter, territory_filters, limit
+                )
             )
-        )
+        except Exception:
+            frappe.log_error(
+                title="approvals._fetch_sales_invoices",
+                message=frappe.get_traceback(),
+            )
 
     if "Delivery Note" in wanted_doctypes and _check("erp_analysis.approvals.delivery_note"):
-        approvals.extend(
-            _fetch_delivery_notes(
-                from_date,
-                to_date,
-                company_filter,
-                territory_filters,
-                limit,
-                delivery_states or None,
+        try:
+            approvals.extend(
+                _fetch_delivery_notes(
+                    from_date,
+                    to_date,
+                    company_filter,
+                    territory_filters,
+                    limit,
+                    delivery_states or None,
+                )
             )
-        )
+        except Exception:
+            frappe.log_error(
+                title="approvals._fetch_delivery_notes",
+                message=frappe.get_traceback(),
+            )
 
     # aging calculation
     pairs = {
@@ -405,6 +419,7 @@ def _expand_territories(territories: Optional[List[str]]) -> List[str]:
 
 
 def _fetch_sales_invoices(from_date, to_date, company, territories, limit):
+    doctype = "Sales Invoice"
     conds, vals = ["si.docstatus = 0"], {}
     conds.append("(si.status IS NULL OR si.status = 'Draft')")
 
@@ -421,8 +436,8 @@ def _fetch_sales_invoices(from_date, to_date, company, territories, limit):
     if company:
         conds.append("si.company = %(company)s")
         vals["company"] = company
-    ...
-    if territories:
+
+    if territories and has_column(doctype, "territory"):
         cleaned = _expand_territories(territories)
         if cleaned:
             if len(cleaned) == 1:
@@ -436,17 +451,18 @@ def _fetch_sales_invoices(from_date, to_date, company, territories, limit):
         f"""
         SELECT
             si.name,
-            si.customer_name,
-            si.customer,
+            {sql_select(doctype, "si", "customer_name")},
+            {sql_select(doctype, "si", "customer")},
             si.posting_date,
-            si.company,
-            si.territory,
-            COALESCE(si.total_qty, 0)                     AS total_quantity,
-            COALESCE(si.base_net_total, 0)                 AS total_amount,
-            COALESCE(si.base_total_taxes_and_charges, 0)   AS vat_amount,
-            COALESCE(si.base_grand_total, 0)               AS total_with_vat,
-            COALESCE(si.status, 'Draft')                   AS status,
-            si.due_date
+            {sql_select(doctype, "si", "company")},
+            {sql_select(doctype, "si", "territory")},
+            {sql_select(doctype, "si", "total_qty", as_name="total_quantity", coalesce="0")},
+            {sql_select(doctype, "si", "base_net_total", as_name="total_amount", coalesce="0")},
+            {sql_select(doctype, "si", "base_total_taxes_and_charges", as_name="vat_amount", coalesce="0")},
+            {sql_select(doctype, "si", "base_grand_total", as_name="total_with_vat", coalesce="0")},
+            COALESCE(si.status, 'Draft') AS status,
+            {sql_select(doctype, "si", "due_date")},
+            {sql_select(doctype, "si", "workflow_state")}
         FROM `tabSales Invoice` si
         WHERE {" AND ".join(conds)}
         ORDER BY si.posting_date DESC, si.name DESC
@@ -472,6 +488,7 @@ def _fetch_sales_invoices(from_date, to_date, company, territories, limit):
             "due_date": str(r.due_date) if r.due_date else None,
             "territory": r.territory,
             "company": r.company,
+            "workflow_state": r.workflow_state,
         }
         for r in rows
     ]
@@ -525,6 +542,7 @@ def _resolve_company_from_access_profile(user: str) -> Optional[str]:
 
 
 def _fetch_delivery_notes(from_date, to_date, company, territories, limit, workflow_states=None):
+    doctype = "Delivery Note"
     conds, vals = ["dn.docstatus = 0"], {}
     conds.append("(dn.status IS NULL OR dn.status = 'Draft')")
 
@@ -541,7 +559,8 @@ def _fetch_delivery_notes(from_date, to_date, company, territories, limit, workf
     if company:
         conds.append("dn.company = %(company)s")
         vals["company"] = company
-    if territories:
+
+    if territories and has_column(doctype, "territory"):
         cleaned = _expand_territories(territories)
         if cleaned:
             if len(cleaned) == 1:
@@ -551,7 +570,8 @@ def _fetch_delivery_notes(from_date, to_date, company, territories, limit, workf
                 conds.append("dn.territory IN %(territories)s")
                 vals["territories"] = tuple(cleaned)
 
-    if workflow_states:
+    # Workflow filter is Printechs-specific; skip when column/meta missing (e.g. Ozdah).
+    if workflow_states and has_column(doctype, "workflow_state"):
         cleaned_states = [s for s in workflow_states if s]
         if cleaned_states:
             conds.append("dn.workflow_state IN %(workflow_states)s")
@@ -561,17 +581,17 @@ def _fetch_delivery_notes(from_date, to_date, company, territories, limit, workf
         f"""
         SELECT
             dn.name,
-            dn.customer_name,
-            dn.customer,
+            {sql_select(doctype, "dn", "customer_name")},
+            {sql_select(doctype, "dn", "customer")},
             dn.posting_date,
-            dn.company,
-            dn.territory,
-            COALESCE(dn.total_qty, 0)                      AS total_quantity,
-            COALESCE(dn.base_net_total, 0)                 AS total_amount,
-            COALESCE(dn.base_total_taxes_and_charges, 0)   AS vat_amount,
-            COALESCE(dn.base_grand_total, 0)               AS total_with_vat,
-            COALESCE(dn.status, 'Draft')                   AS status,
-            dn.workflow_state
+            {sql_select(doctype, "dn", "company")},
+            {sql_select(doctype, "dn", "territory")},
+            {sql_select(doctype, "dn", "total_qty", as_name="total_quantity", coalesce="0")},
+            {sql_select(doctype, "dn", "base_net_total", as_name="total_amount", coalesce="0")},
+            {sql_select(doctype, "dn", "base_total_taxes_and_charges", as_name="vat_amount", coalesce="0")},
+            {sql_select(doctype, "dn", "base_grand_total", as_name="total_with_vat", coalesce="0")},
+            COALESCE(dn.status, 'Draft') AS status,
+            {sql_select(doctype, "dn", "workflow_state")}
         FROM `tabDelivery Note` dn
         WHERE {" AND ".join(conds)}
         ORDER BY dn.posting_date DESC, dn.name DESC

@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import frappe
-from frappe.utils import add_months, cint, getdate, nowdate
+from frappe.utils import add_months, getdate, nowdate
+
+from erp_analysis.utils.schema import has_column, sql_select
 
 
 def _aging_bucket(posting_date) -> str:
@@ -20,6 +22,7 @@ def _aging_bucket(posting_date) -> str:
 
 
 def _fetch_pending_sales_invoices(company: Optional[str], from_date: str, to_date: str) -> list[dict]:
+	doctype = "Sales Invoice"
 	conds = [
 		"si.docstatus = 0",
 		"(si.status IS NULL OR si.status = 'Draft')",
@@ -30,14 +33,19 @@ def _fetch_pending_sales_invoices(company: Optional[str], from_date: str, to_dat
 		conds.append("si.company = %(company)s")
 		vals["company"] = company
 
+	if has_column(doctype, "workflow_state"):
+		status_sql = "COALESCE(si.workflow_state, si.status, 'Draft') AS status"
+	else:
+		status_sql = "COALESCE(si.status, 'Draft') AS status"
+
 	return frappe.db.sql(
 		f"""
 		SELECT
 			'Sales Invoice' AS doctype,
 			si.name,
-			COALESCE(si.status, 'Draft') AS status,
+			{status_sql},
 			si.posting_date,
-			COALESCE(si.base_grand_total, 0) AS amount
+			{sql_select(doctype, "si", "base_grand_total", as_name="amount", coalesce="0")}
 		FROM `tabSales Invoice` si
 		WHERE {" AND ".join(conds)}
 		""",
@@ -52,6 +60,7 @@ def _fetch_pending_delivery_notes(
 	to_date: str,
 	workflow_states: Optional[list[str]] = None,
 ) -> list[dict]:
+	doctype = "Delivery Note"
 	conds = [
 		"dn.docstatus = 0",
 		"dn.posting_date BETWEEN %(from)s AND %(to)s",
@@ -60,18 +69,28 @@ def _fetch_pending_delivery_notes(
 	if company:
 		conds.append("dn.company = %(company)s")
 		vals["company"] = company
-	if workflow_states:
+
+	has_wf = has_column(doctype, "workflow_state")
+	if workflow_states and has_wf:
 		conds.append("dn.workflow_state IN %(states)s")
 		vals["states"] = tuple(workflow_states)
+	elif not has_wf:
+		# No workflow on this site — treat like draft DN inbox (status Draft).
+		conds.append("(dn.status IS NULL OR dn.status = 'Draft')")
+
+	if has_wf:
+		status_sql = "COALESCE(dn.workflow_state, dn.status, 'Draft') AS status"
+	else:
+		status_sql = "COALESCE(dn.status, 'Draft') AS status"
 
 	return frappe.db.sql(
 		f"""
 		SELECT
 			'Delivery Note' AS doctype,
 			dn.name,
-			COALESCE(dn.workflow_state, dn.status, 'Draft') AS status,
+			{status_sql},
 			dn.posting_date,
-			COALESCE(dn.base_grand_total, 0) AS amount
+			{sql_select(doctype, "dn", "base_grand_total", as_name="amount", coalesce="0")}
 		FROM `tabDelivery Note` dn
 		WHERE {" AND ".join(conds)}
 		""",
@@ -89,15 +108,31 @@ def get_approval_summary_payload(
 	from_date = str(getdate(from_date or add_months(nowdate(), -2)))
 	to_date = str(getdate(to_date or nowdate()))
 
-	rows = _fetch_pending_sales_invoices(company, from_date, to_date)
-	rows.extend(
-		_fetch_pending_delivery_notes(
-			company,
-			from_date,
-			to_date,
-			workflow_states=["Approved By Finance Coordinator"],
+	rows: list[dict] = []
+	try:
+		rows.extend(_fetch_pending_sales_invoices(company, from_date, to_date))
+	except Exception:
+		frappe.log_error(
+			title="approval_analytics._fetch_pending_sales_invoices",
+			message=frappe.get_traceback(),
 		)
-	)
+
+	try:
+		# Printechs DN workflow gate; ignored automatically when column missing.
+		wf_states = ["Approved By Finance Coordinator"] if has_column("Delivery Note", "workflow_state") else None
+		rows.extend(
+			_fetch_pending_delivery_notes(
+				company,
+				from_date,
+				to_date,
+				workflow_states=wf_states,
+			)
+		)
+	except Exception:
+		frappe.log_error(
+			title="approval_analytics._fetch_pending_delivery_notes",
+			message=frappe.get_traceback(),
+		)
 
 	by_doctype: dict[str, int] = {}
 	by_status: dict[str, int] = {}

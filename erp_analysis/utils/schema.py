@@ -7,23 +7,71 @@ from typing import Optional, Sequence
 import frappe
 
 
+def has_field(doctype: str, fieldname: str) -> bool:
+	"""True if field exists on DocType meta (standard or Custom Field)."""
+	if not fieldname:
+		return False
+	if fieldname == "name":
+		return True
+	try:
+		return bool(frappe.get_meta(doctype).has_field(fieldname))
+	except Exception:
+		return False
+
+
+def has_column(doctype: str, fieldname: str) -> bool:
+	"""True if physical DB column exists (use for raw SQL SELECT/WHERE)."""
+	if not fieldname:
+		return False
+	if fieldname == "name":
+		return True
+	try:
+		return bool(frappe.db.has_column(doctype, fieldname))
+	except Exception:
+		return False
+
+
 def existing_fields(doctype: str, fields: Sequence[str]) -> list[str]:
 	"""Return fieldnames that exist on DocType meta (standard or custom).
 
 	``name`` is always kept when requested — it is the primary key and is not
 	listed as a normal meta field on most DocTypes.
 	"""
-	meta = frappe.get_meta(doctype)
-	out: list[str] = []
-	for f in fields:
-		if f == "name" or meta.has_field(f):
-			out.append(f)
-	return out
+	return [f for f in fields if has_field(doctype, f)]
 
 
 def existing_columns(doctype: str, fields: Sequence[str]) -> list[str]:
 	"""Return fieldnames that exist as DB columns (safer for raw SELECT)."""
-	return [f for f in fields if f == "name" or frappe.db.has_column(doctype, f)]
+	return [f for f in fields if has_column(doctype, f)]
+
+
+def sql_select(
+	doctype: str,
+	alias: str,
+	fieldname: str,
+	*,
+	as_name: Optional[str] = None,
+	coalesce: Optional[str] = None,
+	missing: str = "NULL",
+) -> str:
+	"""Build a SELECT fragment that is safe when the column is absent.
+
+	Examples::
+	    sql_select("Delivery Note", "dn", "workflow_state")
+	    # -> "dn.workflow_state AS workflow_state" or "NULL AS workflow_state"
+
+	    sql_select("Delivery Note", "dn", "total_qty", coalesce="0")
+	    # -> "COALESCE(dn.total_qty, 0) AS total_qty" or "0 AS total_qty"
+	"""
+	col = as_name or fieldname
+	if has_column(doctype, fieldname):
+		expr = f"`{alias}`.`{fieldname}`"
+		if coalesce is not None:
+			return f"COALESCE({expr}, {coalesce}) AS `{col}`"
+		return f"{expr} AS `{col}`"
+	if coalesce is not None:
+		return f"{coalesce} AS `{col}`"
+	return f"{missing} AS `{col}`"
 
 
 def safe_get_value(
