@@ -31,14 +31,23 @@ doc_events = {
 	"E Catalogue": {
 		"after_save": "erp_analysis.erp_analysis.doctype.e_catalogue.e_catalogue.after_save",
 	},
+	"Delivery Note": {
+		"before_validate": "erp_analysis.delivery_note_defaults.before_validate",
+	},
 }
 
 app_init = [
 	"erp_analysis.permissions.customer.apply_customer_360_permission_patch",
+	"erp_analysis.permissions.strict_empty_links.apply_strict_empty_link_patch",
+]
+
+before_request = [
+	"erp_analysis.permissions.strict_empty_links.ensure_strict_empty_link_patch",
 ]
 
 doctype_js = {
 	"Payment Entry": "public/js/payment_entry.js",
+	"Delivery Note": "public/js/delivery_note.js",
 }
 
 override_whitelisted_methods = {

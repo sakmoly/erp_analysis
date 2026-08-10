@@ -101,10 +101,15 @@ def get_inventory_snapshot(company=None, warehouse=None, fast: bool = True):
     """
     aging_params = [company] + sle_wh_params + bin_params
 
-    # Category split - unchanged but benefits from indexes
+    # Category split — use Item.category only if that custom column exists
+    if frappe.db.has_column("Item", "category"):
+        category_expr = "COALESCE(NULLIF(i.category, ''), i.item_group, 'Uncategorized')"
+    else:
+        category_expr = "COALESCE(i.item_group, 'Uncategorized')"
+
     category_sql = f"""
         SELECT
-            COALESCE(NULLIF(i.category, ''), i.item_group, 'Uncategorized') AS category,
+            {category_expr} AS category,
             COALESCE(SUM(b.actual_qty * COALESCE(b.valuation_rate, 0)), 0) AS value
         FROM `tabBin` b
         INNER JOIN `tabWarehouse` w ON w.name = b.warehouse

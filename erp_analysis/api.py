@@ -3,6 +3,34 @@ import frappe
 from erp_analysis import __version__ as APP_VERSION
 
 
+@frappe.whitelist()
+def probe_strict_empty_perm():
+	"""Temporary desk diagnostic for Strict UP empty-link patch."""
+	import frappe.permissions as perm_mod
+	from erp_analysis.permissions import strict_empty_links as m
+
+	m.ensure_strict_empty_link_patch()
+	out = {
+		"user": frappe.session.user,
+		"strict": frappe.db.get_single_value("System Settings", "apply_strict_user_permissions"),
+		"patched": m._patched,
+		"fn": getattr(perm_mod.has_user_permission, "__qualname__", str(perm_mod.has_user_permission)),
+		"results": {},
+	}
+	for dt in ("Sales Order", "Sales Invoice", "Delivery Note"):
+		empty = frappe.new_doc(dt)
+		jed = frappe.new_doc(dt)
+		jed.territory = "Jeddah"
+		riy = frappe.new_doc(dt)
+		riy.territory = "Riyadh"
+		out["results"][dt] = {
+			"empty": bool(frappe.has_permission(dt, "create", doc=empty)),
+			"jeddah": bool(frappe.has_permission(dt, "create", doc=jed)),
+			"riyadh": bool(frappe.has_permission(dt, "create", doc=riy)),
+		}
+	return out
+
+
 @frappe.whitelist(allow_guest=True)
 def health():
 	return {

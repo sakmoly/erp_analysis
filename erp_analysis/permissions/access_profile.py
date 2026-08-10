@@ -95,22 +95,32 @@ def get_profile(
 
 
 def get_lines(profile_name: str) -> List[dict]:
+	"""Load Access Profile rules; only select columns that exist on this site."""
+	meta = frappe.get_meta(PROFILE_LINE_DOCTYPE)
+	wanted = [
+		"access_object",
+		"object_type",
+		"can_view",
+		"can_approve",
+		"can_export",
+		"can_create",
+		"can_edit",
+		"condition_expression",
+		"data_filters_json",
+		"sequence",
+		"active",
+	]
+	fields = [f for f in wanted if meta.has_field(f)]
+	if not fields:
+		fields = ["access_object", "can_view", "can_approve"]
+
+	order_by = "sequence asc" if meta.has_field("sequence") else "modified asc"
+
 	return frappe.get_all(
 		PROFILE_LINE_DOCTYPE,
 		filters={"parent": profile_name, "parenttype": PROFILE_DOCTYPE, "active": 1},
-		fields=[
-			"access_object",
-			"object_type",
-			"can_view",
-			"can_approve",
-			"can_export",
-			"can_create",
-			"can_edit",
-			"priority",
-			"condition_expression",
-			"data_filters_json",
-		],
-		order_by="priority asc, sequence asc",
+		fields=fields,
+		order_by=order_by,
 	)
 
 
@@ -159,7 +169,8 @@ def evaluate(
 	registry_map = get_registry_map()
 
 	for line in lines:
-		registry_obj = registry_map.get(line.access_object)
+		access_object = line.get("access_object") if isinstance(line, dict) else line.access_object
+		registry_obj = registry_map.get(access_object)
 		if not registry_obj:
 			continue
 
@@ -167,13 +178,27 @@ def evaluate(
 			continue
 
 		decision = {
-			"can_view": bool(line.can_view),
-			"can_approve": bool(line.can_approve),
-			"can_export": bool(getattr(line, "can_export", 0)),
-			"can_create": bool(getattr(line, "can_create", 0)),
-			"can_edit": bool(getattr(line, "can_edit", 0)),
-			"data_filters": line.data_filters_json,
-			"condition": line.condition_expression,
+			"can_view": bool(line.get("can_view") if isinstance(line, dict) else line.can_view),
+			"can_approve": bool(line.get("can_approve") if isinstance(line, dict) else line.can_approve),
+			"can_export": bool(
+				(line.get("can_export") if isinstance(line, dict) else getattr(line, "can_export", 0)) or 0
+			),
+			"can_create": bool(
+				(line.get("can_create") if isinstance(line, dict) else getattr(line, "can_create", 0)) or 0
+			),
+			"can_edit": bool(
+				(line.get("can_edit") if isinstance(line, dict) else getattr(line, "can_edit", 0)) or 0
+			),
+			"data_filters": (
+				line.get("data_filters_json")
+				if isinstance(line, dict)
+				else getattr(line, "data_filters_json", None)
+			),
+			"condition": (
+				line.get("condition_expression")
+				if isinstance(line, dict)
+				else getattr(line, "condition_expression", None)
+			),
 		}
 		if not decision["can_view"] and not decision["can_approve"]:
 			continue
