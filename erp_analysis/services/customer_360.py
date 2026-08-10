@@ -11,28 +11,47 @@ from frappe.utils import add_days, add_months, get_first_day, get_last_day, getd
 
 from erp_analysis.services.sales_orders import get_open_sales_orders
 from erp_analysis.utils.rpc import resolve_customer_id
+from erp_analysis.utils.schema import customer_credit_limit, existing_fields, safe_get_value
 
 CHART_MONTHS = 6
 
+# Core Customer fields — selected only if present on this site's meta.
+_CUSTOMER_PROFILE_FIELDS = (
+	"name",
+	"customer_name",
+	"territory",
+	"customer_group",
+	"customer_type",
+	"mobile_no",
+	"email_id",
+	"tax_id",
+	"payment_terms",
+)
 
-def get_customer_profile(customer: str) -> dict[str, Any]:
-	"""Full profile for other endpoints (includes credit fields)."""
+_CUSTOMER_SHELL_FIELDS = ("name", "customer_name", "territory")
+
+
+def get_customer_profile(
+	customer: str,
+	company: Optional[str] = None,
+) -> dict[str, Any]:
+	"""Full profile for other endpoints (includes credit — schema-safe)."""
 	if not frappe.db.exists("Customer", customer):
-		return {"name": customer, "customer_name": customer}
+		return {
+			"name": customer,
+			"customer_name": customer,
+			"territory": "",
+			"customer_group": "",
+			"customer_type": "",
+			"mobile_no": "",
+			"email_id": "",
+			"tax_id": "",
+			"payment_terms": "",
+			"credit_limit": 0.0,
+		}
 
-	fields = [
-		"name",
-		"customer_name",
-		"territory",
-		"customer_group",
-		"customer_type",
-		"mobile_no",
-		"email_id",
-		"tax_id",
-		"payment_terms",
-		"credit_limit",
-	]
-	row = frappe.db.get_value("Customer", customer, fields, as_dict=True) or {}
+	row = safe_get_value("Customer", customer, _CUSTOMER_PROFILE_FIELDS) or {}
+	company = company or frappe.defaults.get_user_default("Company")
 	return {
 		"name": row.get("name") or customer,
 		"customer_name": row.get("customer_name") or customer,
@@ -43,18 +62,35 @@ def get_customer_profile(customer: str) -> dict[str, Any]:
 		"email_id": row.get("email_id") or "",
 		"tax_id": row.get("tax_id") or "",
 		"payment_terms": row.get("payment_terms") or "",
-		"credit_limit": float(row.get("credit_limit") or 0),
+		# Never SELECT Customer.credit_limit — use child table / optional column helper.
+		"credit_limit": customer_credit_limit(customer, company),
 	}
 
 
 def get_customer_object(customer: str) -> dict[str, Any]:
-	"""Mobile shell — no DSO / credit fields."""
-	profile = get_customer_profile(customer)
+	"""Mobile shell — no DSO / credit fields; minimal safe SELECT only."""
+	if not frappe.db.exists("Customer", customer):
+		return {"id": customer, "customer_name": customer, "territory": ""}
+
+	fields = existing_fields("Customer", _CUSTOMER_SHELL_FIELDS) or ["name"]
+	row = frappe.db.get_value("Customer", customer, fields, as_dict=True) or {}
 	return {
-		"id": profile["name"],
-		"customer_name": profile["customer_name"],
-		"territory": profile.get("territory") or "",
+		"id": row.get("name") or customer,
+		"customer_name": row.get("customer_name") or customer,
+		"territory": row.get("territory") or "",
 	}
+
+
+def _safe_customer_shell(customer_id: str) -> dict[str, Any]:
+	"""Never raise from empty/error payload path."""
+	try:
+		return get_customer_object(customer_id)
+	except Exception:
+		frappe.log_error(
+			title="customer_360._safe_customer_shell",
+			message=frappe.get_traceback(),
+		)
+		return {"id": customer_id, "customer_name": customer_id, "territory": ""}
 
 
 def get_customer_receivables_block(
@@ -347,8 +383,29 @@ def empty_customer_360_payload(
 	to_date: Optional[str] = None,
 	open_so_limit: int = 10,
 ) -> dict[str, Any]:
+	"""Degraded payload — must not re-hit broken SELECT lists."""
+	statement = {
+		"company": company,
+		"customer": customer_id,
+		"from_date": from_date,
+		"to_date": to_date,
+		"pdf_method": "erp_analysis.customer_notifications.send_statement_pdf",
+	}
+	try:
+		statement = get_statement_link(
+			company=company,
+			customer=customer_id,
+			from_date=from_date,
+			to_date=to_date,
+		)
+	except Exception:
+		frappe.log_error(
+			title="customer_360.empty_statement",
+			message=frappe.get_traceback(),
+		)
+
 	return {
-		"customer": get_customer_object(customer_id),
+		"customer": _safe_customer_shell(customer_id),
 		"company": company,
 		"receivables": {
 			"outstanding": 0.0,
@@ -361,12 +418,7 @@ def empty_customer_360_payload(
 		"charts": {"months": [], "sales": [], "collection": [], "receivables": []},
 		"recent_invoices": [],
 		"open_sales_orders": {"rows": [], "pagination": {"total": 0, "limit": open_so_limit, "offset": 0}},
-		"statement": get_statement_link(
-			company=company,
-			customer=customer_id,
-			from_date=from_date,
-			to_date=to_date,
-		),
+		"statement": statement,
 	}
 
 
