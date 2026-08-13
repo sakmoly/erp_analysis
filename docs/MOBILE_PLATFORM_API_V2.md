@@ -98,3 +98,94 @@ No profile ID or customer ID is accepted. Optional:
 |-----------|----------|
 | Guest / no auth | `AuthenticationError` |
 | Company outside Access Profile scope | `PermissionError` |
+
+---
+
+# Generic Analytics (Phase D)
+
+All endpoints require authentication. The client sends **logical dimension keys only** — never field names or DocTypes.
+
+## `erp_analysis.analytics.get_dimensions`
+
+Returns enabled dimensions for the logged-in user (Mobile App Profile or legacy Settings fallback).
+
+```json
+{
+  "data": [
+    {
+      "key": "territory",
+      "label": "Territory",
+      "data_type": "Link",
+      "filterable": true,
+      "groupable": true,
+      "sortable": false
+    }
+  ],
+  "meta": { "schema_version": 1, "count": 1 }
+}
+```
+
+## `erp_analysis.analytics.get_dimension_values`
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `dimension` | Yes | Logical key e.g. `territory`, `brand` |
+| `search` | No | Optional text filter |
+| `limit` | No | Default 50, max 200 |
+| `company` | No | Must match Access Profile company |
+
+```json
+{
+  "data": [{ "value": "Jeddah", "label": "Jeddah" }],
+  "meta": { "schema_version": 1, "dimension": "territory", "count": 1 }
+}
+```
+
+## `erp_analysis.analytics.get_sales_analysis`
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `dimension` | Yes | Group-by logical key |
+| `metric` | No | `net_sales` (default), `gross_sales`, `sales_qty`, `transactions`, `average_transaction` |
+| `from_date` / `to_date` | No | Default: MTD |
+| `filters` | No | JSON object of logical keys → value arrays |
+| `limit` | No | Default 50 |
+| `order` | No | `desc` (default) or `asc` |
+| `company` | No | Scoped to Access Profile when set |
+
+Example filters:
+
+```json
+{
+  "filters": {
+    "brand": ["NIKE", "ADIDAS"],
+    "territory": ["Jeddah"]
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "data": [
+    {
+      "dimension_value": "Jeddah",
+      "label": "Jeddah",
+      "metric_value": 125000.5,
+      "rank": 1
+    }
+  ],
+  "meta": {
+    "schema_version": 1,
+    "from_date": "2026-08-01",
+    "to_date": "2026-08-13",
+    "dimension": "territory",
+    "metric": "net_sales",
+    "count": 1
+  }
+}
+```
+
+Unknown dimensions or metrics return validation errors — never silent SQL injection.
+
