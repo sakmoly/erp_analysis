@@ -34,3 +34,6 @@ node_modules/
 # Local temp scripts
 _tmp_*.py
 **/_tmp_*.py
+
+# Permission safety exports (contain user/role data)
+erp_analysis/backups/
