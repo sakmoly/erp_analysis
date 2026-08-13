@@ -120,11 +120,36 @@ def get_profile_dimensions_public(profile_name: str) -> list[dict[str, Any]]:
 	]
 
 
-def get_profile_widgets(profile_name: str, *, enabled_only: bool = True) -> list[dict[str, Any]]:
+def _widget_row_public(row, *, default_board: str) -> dict[str, Any]:
+	key = (row.widget_key or "").strip()
+	board_id = (row.dashboard_id or default_board or "home").strip()
+	return {
+		"key": key,
+		"label": row.label or key,
+		"widget_type": row.widget_type,
+		"dashboard_id": board_id,
+		"metric_key": row.metric_key,
+		"module_key": row.module_key,
+		"dimension_key": row.dimension_key,
+		"secondary_dimension_key": row.secondary_dimension_key,
+		"size": row.size or "md",
+		"sort_order": row.sort_order or 0,
+		"config_json": row.config_json,
+		"config": _parse_config_json(row.config_json),
+	}
+
+
+def get_profile_widgets(
+	profile_name: str,
+	*,
+	enabled_only: bool = True,
+	dashboard_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
 	doc = get_mobile_app_profile(profile_name)
 	if not doc:
 		return []
 
+	default_board = (doc.default_dashboard or "home").strip()
 	rows = []
 	for row in doc.dashboard_widgets or []:
 		if enabled_only and not row.enabled:
@@ -132,23 +157,59 @@ def get_profile_widgets(profile_name: str, *, enabled_only: bool = True) -> list
 		key = (row.widget_key or "").strip()
 		if not key:
 			continue
-		rows.append(
-			{
-				"key": key,
-				"label": row.label or key,
-				"widget_type": row.widget_type,
-				"metric_key": row.metric_key,
-				"module_key": row.module_key,
-				"dimension_key": row.dimension_key,
-				"secondary_dimension_key": row.secondary_dimension_key,
-				"size": row.size or "md",
-				"sort_order": row.sort_order or 0,
-				"config_json": row.config_json,
-				"config": _parse_config_json(row.config_json),
-			}
-		)
+		public = _widget_row_public(row, default_board=default_board)
+		if dashboard_id is not None:
+			target = (dashboard_id or default_board).strip()
+			if (public.get("dashboard_id") or default_board) != target:
+				continue
+		rows.append(public)
 	rows.sort(key=lambda r: (r.get("sort_order") or 0, r.get("label") or ""))
 	return rows
+
+
+def get_profile_dashboard_boards(profile_name: str, *, enabled_only: bool = True) -> list[dict[str, Any]]:
+	"""Return dashboard boards with nested widgets for bootstrap."""
+	doc = get_mobile_app_profile(profile_name)
+	if not doc:
+		return []
+
+	default_board = (doc.default_dashboard or "home").strip()
+	all_widgets = get_profile_widgets(profile_name, enabled_only=enabled_only)
+	board_rows = list(doc.dashboards or [])
+
+	if not board_rows:
+		return [
+			{
+				"key": default_board,
+				"label": "Dashboard",
+				"sort_order": 0,
+				"icon_key": None,
+				"widgets": all_widgets,
+			}
+		]
+
+	boards: list[dict[str, Any]] = []
+	for row in board_rows:
+		if enabled_only and not row.enabled:
+			continue
+		board_key = (row.dashboard_key or "").strip()
+		if not board_key:
+			continue
+		boards.append(
+			{
+				"key": board_key,
+				"label": row.label or board_key,
+				"sort_order": row.sort_order or 0,
+				"icon_key": row.icon_key,
+				"widgets": [
+					w
+					for w in all_widgets
+					if (w.get("dashboard_id") or default_board) == board_key
+				],
+			}
+		)
+	boards.sort(key=lambda r: (r.get("sort_order") or 0, r.get("label") or ""))
+	return boards
 
 
 def get_profile_branding(profile_name: str) -> dict[str, Any]:
@@ -186,5 +247,6 @@ def get_profile_context(
 		"branding": get_profile_branding(profile_name),
 		"modules": get_profile_modules(profile_name),
 		"dimensions": get_profile_dimensions_public(profile_name),
+		"dashboards": get_profile_dashboard_boards(profile_name),
 		"dashboard_widgets": get_profile_widgets(profile_name),
 	}

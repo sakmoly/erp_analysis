@@ -14,6 +14,7 @@ from erp_analysis.access_context import _allowed_module_keys_for_access, get_eff
 from erp_analysis.security import require_authenticated_user
 from erp_analysis.services.mobile_profile import (
 	get_profile_branding,
+	get_profile_dashboard_boards,
 	get_profile_modules,
 	get_profile_widgets,
 	resolve_mobile_app_profile_name,
@@ -49,7 +50,8 @@ def build_mobile_bootstrap(
 
 	modules = _build_modules(user, company, profile_name, legacy_config, access)
 	dimensions = _build_dimensions(profile_name, legacy_config)
-	dashboard = _build_dashboard(profile_name, legacy_config)
+	dashboard_boards = _build_dashboard_boards(profile_name, legacy_config)
+	dashboard = _default_dashboard_widgets(dashboard_boards, profile_name, legacy_config)
 	branding = _build_branding(profile_name, legacy_config)
 	context = _build_context(user, company, profile_name, access)
 	capabilities = _build_capabilities(access)
@@ -62,6 +64,7 @@ def build_mobile_bootstrap(
 		"branding": branding,
 		"modules": modules,
 		"dimensions": dimensions,
+		"dashboards": dashboard_boards,
 		"dashboard": dashboard,
 		"permissions": {
 			"scope": access.get("scope") or {},
@@ -106,6 +109,11 @@ def _build_context(
 		ctx["profile_display_name"] = frappe.db.get_value(
 			"Mobile App Profile", profile_name, "profile_name"
 		)
+		ctx["default_dashboard"] = frappe.db.get_value(
+			"Mobile App Profile", profile_name, "default_dashboard"
+		) or "home"
+	else:
+		ctx["default_dashboard"] = "home"
 
 	scope = access.get("scope") or {}
 	if scope:
@@ -210,15 +218,83 @@ def _build_dimensions(profile_name: Optional[str], legacy_config: dict[str, Any]
 	return out
 
 
-def _build_dashboard(profile_name: Optional[str], legacy_config: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_dashboard_boards(profile_name: Optional[str], legacy_config: dict[str, Any]) -> list[dict[str, Any]]:
 	if profile_name:
-		return get_profile_widgets(profile_name)
+		return get_profile_dashboard_boards(profile_name)
 
+	dashboards = legacy_config.get("dashboards") or []
+	if not dashboards:
+		return [
+			{
+				"key": "home",
+				"label": "Dashboard",
+				"sort_order": 0,
+				"icon_key": None,
+				"widgets": _legacy_flat_widgets(legacy_config),
+			}
+		]
+
+	boards: list[dict[str, Any]] = []
+	for board in dashboards:
+		if not isinstance(board, dict):
+			continue
+		board_id = board.get("id") or board.get("key") or "home"
+		widgets = []
+		for widget in board.get("widgets") or []:
+			if not isinstance(widget, dict):
+				continue
+			widgets.append(
+				{
+					"key": widget.get("id") or widget.get("key"),
+					"label": widget.get("title") or widget.get("label"),
+					"widget_type": widget.get("type") or "LIST",
+					"module_key": widget.get("module") or board.get("module"),
+					"dashboard_id": board_id,
+					"enabled": True,
+				}
+			)
+		boards.append(
+			{
+				"key": board_id,
+				"label": board.get("title") or board.get("label") or board_id,
+				"sort_order": board.get("sort_order") or 0,
+				"icon_key": board.get("icon_key"),
+				"widgets": widgets,
+			}
+		)
+	boards.sort(key=lambda r: (r.get("sort_order") or 0, r.get("label") or ""))
+	return boards
+
+
+def _default_dashboard_widgets(
+	dashboard_boards: list[dict[str, Any]],
+	profile_name: Optional[str],
+	legacy_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+	if not dashboard_boards:
+		return _legacy_flat_widgets(legacy_config)
+
+	default_key = "home"
+	if profile_name:
+		default_key = (get_profile_branding(profile_name).get("default_dashboard") or "home").strip()
+	else:
+		first_board = (legacy_config.get("dashboards") or [{}])[0]
+		if isinstance(first_board, dict):
+			default_key = first_board.get("id") or first_board.get("key") or "home"
+
+	for board in dashboard_boards:
+		if board.get("key") == default_key:
+			return board.get("widgets") or []
+	return dashboard_boards[0].get("widgets") or []
+
+
+def _legacy_flat_widgets(legacy_config: dict[str, Any]) -> list[dict[str, Any]]:
 	dashboards = legacy_config.get("dashboards") or []
 	out: list[dict[str, Any]] = []
 	for board in dashboards:
 		if not isinstance(board, dict):
 			continue
+		board_id = board.get("id") or board.get("key") or "home"
 		for widget in board.get("widgets") or []:
 			if not isinstance(widget, dict):
 				continue
@@ -228,8 +304,14 @@ def _build_dashboard(profile_name: Optional[str], legacy_config: dict[str, Any])
 					"label": widget.get("title") or widget.get("label"),
 					"widget_type": widget.get("type") or "LIST",
 					"module_key": widget.get("module") or board.get("module"),
+					"dashboard_id": board_id,
 					"enabled": True,
 				}
 			)
 	return out
+
+
+def _build_dashboard(profile_name: Optional[str], legacy_config: dict[str, Any]) -> list[dict[str, Any]]:
+	"""Backward-compatible flat widget list for default dashboard board."""
+	return _default_dashboard_widgets(_build_dashboard_boards(profile_name, legacy_config), profile_name, legacy_config)
 

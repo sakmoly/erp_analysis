@@ -26,6 +26,7 @@
   "sec_dimensions",
   "dimensions",
   "sec_dashboard",
+  "dashboards",
   "dashboard_widgets"
  ],
  "fields": [
@@ -138,7 +139,13 @@
   {
    "fieldname": "sec_dashboard",
    "fieldtype": "Section Break",
-   "label": "Dashboard Widgets"
+   "label": "Dashboards"
+  },
+  {
+   "fieldname": "dashboards",
+   "fieldtype": "Table",
+   "label": "Dashboard Boards",
+   "options": "Mobile App Dashboard"
   },
   {
    "fieldname": "dashboard_widgets",

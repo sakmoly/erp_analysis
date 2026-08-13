@@ -71,6 +71,7 @@ def get_dashboard_widget_data(
 	dimension: str | None = None,
 	filters: Any = None,
 	drill_depth: int | None = None,
+	compare: str | None = None,
 	**kwargs,
 ):
 	"""Return chart/list data for one profile dashboard widget (v2 dynamic home)."""
@@ -88,6 +89,7 @@ def get_dashboard_widget_data(
 		dimension=get_arg("dimension", dimension),
 		filters=get_arg("filters", filters),
 		drill_depth=to_int(drill, None) if drill is not None and str(drill).strip() != "" else None,
+		compare=get_arg("compare", compare),
 		**kwargs,
 	)
 

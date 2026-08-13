@@ -13,6 +13,7 @@ from erp_analysis.services.mobile_profile import resolve_mobile_app_profile_name
 
 CHART_WIDGET_TYPES = frozenset({"PIE", "DONUT", "BAR", "LINE", "RANKING"})
 LEGACY_WIDGET_TYPES = frozenset({"LIST", "KPI", "TABLE", "MATRIX"})
+NAV_WIDGET_TYPES = frozenset({"LINK"})
 
 # Defaults when Desk row omits metric/dimension/legacy API mapping.
 WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -117,6 +118,47 @@ def _depth_for_dimension(dimension: str, drill_path: list[str]) -> Optional[int]
 		return None
 
 
+def resolve_widget_action(widget: dict[str, Any]) -> dict[str, Any]:
+	"""Navigation action for LINK widgets (config.action or module default)."""
+	config = widget.get("config") or {}
+	action = config.get("action")
+	if isinstance(action, dict) and action.get("type"):
+		return action
+
+	widget_type = (widget.get("widget_type") or "").upper()
+	module_key = widget.get("module_key")
+	if widget_type == "LINK" and module_key:
+		target = config.get("target") or "module"
+		if target == "dashboard":
+			dashboard_id = config.get("dashboard_id") or module_key
+			return {
+				"type": "navigate",
+				"target": "dashboard",
+				"dashboard_id": dashboard_id,
+			}
+		return {
+			"type": "navigate",
+			"target": "module",
+			"route_key": config.get("route_key") or module_key,
+			"screen": config.get("screen") or "dashboard",
+		}
+
+	frappe.throw(
+		_("Widget {0} has no navigation action configured").format(widget.get("key")),
+		frappe.ValidationError,
+	)
+
+
+def _resolve_compare_mode(config: dict[str, Any], compare_override: Optional[str] = None) -> Optional[str]:
+	if compare_override:
+		key = compare_override.strip().lower()
+		return key or None
+	compare = config.get("compare")
+	if not compare:
+		return None
+	return str(compare).strip().lower() or None
+
+
 def resolve_widget_definition(
 	user: str,
 	widget_key: str,
@@ -142,7 +184,7 @@ def resolve_widget_definition(
 	if not row and not defaults:
 		frappe.throw(_("Unknown dashboard widget: {0}").format(key), frappe.ValidationError)
 
-	config = parse_widget_config_json(row.get("config_json"))
+	config = row.get("config") or parse_widget_config_json(row.get("config_json"))
 
 	merged = {
 		"key": key,
@@ -154,6 +196,7 @@ def resolve_widget_definition(
 		"secondary_dimension_key": row.get("secondary_dimension_key") or defaults.get("secondary_dimension_key"),
 		"legacy_method": defaults.get("legacy_method"),
 		"size": row.get("size") or "md",
+		"dashboard_id": row.get("dashboard_id"),
 		"config": config,
 	}
 	return merged
@@ -169,6 +212,7 @@ def get_dashboard_widget_data(
 	dimension: Optional[str] = None,
 	filters: Any = None,
 	drill_depth: Optional[int] = None,
+	compare: Optional[str] = None,
 	**kwargs,
 ) -> dict[str, Any]:
 	"""Return chart series or legacy payload for one bootstrap dashboard widget."""
@@ -182,6 +226,7 @@ def get_dashboard_widget_data(
 		drill_depth = kwargs.get("drill_depth")
 	if drill_depth is not None:
 		drill_depth = int(drill_depth)
+	compare = compare or kwargs.get("compare")
 
 	widget = resolve_widget_definition(user, widget_key, company=company)
 	module_key = widget.get("module_key")
@@ -192,6 +237,9 @@ def get_dashboard_widget_data(
 	)
 	company = ctx["company"]
 	widget_type = widget["widget_type"]
+
+	if widget_type in NAV_WIDGET_TYPES:
+		return _link_widget_payload(widget)
 
 	if widget_type in CHART_WIDGET_TYPES:
 		return _chart_widget_payload(
@@ -204,6 +252,7 @@ def get_dashboard_widget_data(
 			dimension_override=dimension,
 			filters=filters,
 			drill_depth=drill_depth,
+			compare_override=compare,
 		)
 
 	if widget_type == "MATRIX":
@@ -226,6 +275,7 @@ def _chart_widget_payload(
 	dimension_override: Optional[str] = None,
 	filters: Any = None,
 	drill_depth: Optional[int] = None,
+	compare_override: Optional[str] = None,
 ) -> dict[str, Any]:
 	metric = widget.get("metric_key") or "net_sales"
 	dimension, config, resolved_depth = resolve_chart_dimension(
@@ -235,6 +285,7 @@ def _chart_widget_payload(
 	)
 	drill_path = _normalize_drill_path(config.get("drill_path"))
 	next_dim = next_drill_dimension(dimension, config)
+	compare_mode = _resolve_compare_mode(config, compare_override)
 
 	from erp_analysis.services.analytics_sales import get_sales_analysis
 
@@ -247,16 +298,20 @@ def _chart_widget_payload(
 		metric=metric,
 		filters=filters,
 		limit=limit,
+		compare=compare_mode,
 	)
 
-	series = [
-		{
+	series = []
+	for row in analysis.get("data") or []:
+		point = {
 			"label": row.get("label") or row.get("dimension_value"),
 			"value": row.get("metric_value"),
 			"dimension_value": row.get("dimension_value"),
 		}
-		for row in analysis.get("data") or []
-	]
+		if compare_mode == "ly":
+			point["value_ly"] = row.get("metric_value_ly")
+			point["change_pct"] = row.get("change_pct")
+		series.append(point)
 
 	applied_filters = (analysis.get("meta") or {}).get("filters") or {}
 
@@ -269,6 +324,7 @@ def _chart_widget_payload(
 			"metric": metric,
 			"dimension": dimension,
 			"filters": applied_filters,
+			"compare": compare_mode,
 		},
 		"meta": {
 			"schema_version": 1,
@@ -278,6 +334,20 @@ def _chart_widget_payload(
 			"drill_depth": resolved_depth,
 			"next_dimension": next_dim,
 			"drillable": bool(next_dim),
+		},
+	}
+
+
+def _link_widget_payload(widget: dict[str, Any]) -> dict[str, Any]:
+	action = resolve_widget_action(widget)
+	return {
+		"widget_key": widget["key"],
+		"widget_type": "LINK",
+		"label": widget.get("label"),
+		"action": action,
+		"meta": {
+			"schema_version": 1,
+			"render_hint": "link",
 		},
 	}
 

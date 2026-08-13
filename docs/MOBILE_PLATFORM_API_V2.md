@@ -121,6 +121,7 @@ The server resolves everything from the logged-in user. **Do not send** profile 
     }
   ],
   "dashboard": [],
+  "dashboards": [],
   "permissions": {
     "scope": {},
     "objects": []
@@ -242,6 +243,40 @@ Response `meta` fields for drill UX:
 | `next_dimension` | Suggested group-by for the next tap |
 | `drillable` | `true` when another drill level exists |
 | `chart.filters` | Filters applied to this query |
+
+**Last-year compare (`compare: "ly"`)** — set in widget Config JSON or pass `compare=ly`:
+
+```json
+{
+  "series": [
+    {
+      "label": "Jeddah",
+      "value": 449107.03,
+      "value_ly": 380000.0,
+      "change_pct": 18.19
+    }
+  ],
+  "compare": "ly"
+}
+```
+
+**LINK widgets** — no chart data; returns `action` for mobile navigation:
+
+```json
+{
+  "widget_key": "goto_receivables",
+  "widget_type": "LINK",
+  "action": {
+    "type": "navigate",
+    "target": "dashboard",
+    "dashboard_id": "receivables_home"
+  }
+}
+```
+
+**Multiple dashboards** — bootstrap includes `dashboards[]` (boards with nested `widgets[]`).  
+`dashboard` remains the **default board** widget list for backward compatibility.  
+`context.default_dashboard` names the opening board key.
 
 **Legacy list/KPI widgets** (`LIST`, `KPI`, `TABLE`):
 

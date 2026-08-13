@@ -1,0 +1,61 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-08-13 16:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "dashboard_key",
+  "label",
+  "enabled",
+  "sort_order",
+  "icon_key"
+ ],
+ "fields": [
+  {
+   "fieldname": "dashboard_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Dashboard Key",
+   "reqd": 1
+  },
+  {
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "0",
+   "fieldname": "sort_order",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Sort Order"
+  },
+  {
+   "fieldname": "icon_key",
+   "fieldtype": "Data",
+   "label": "Icon Key"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-13 16:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "Mobile App Dashboard",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

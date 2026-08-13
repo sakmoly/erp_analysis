@@ -463,6 +463,131 @@ bench --site site1.local execute erp_analysis.api.get_dashboard_widget_data \
 
 ---
 
+## 11. LY compare, LINK navigation, multiple dashboards
+
+### 11.1 Net Sales vs Last Year on charts
+
+**Desk — Config JSON** on a chart widget:
+
+```json
+{
+  "compare": "ly"
+}
+```
+
+**API override** (optional):
+
+```
+get_dashboard_widget_data?widget_key=sales_card&compare=ly
+```
+
+**Response series point:**
+
+```json
+{
+  "label": "Jeddah",
+  "value": 449107.03,
+  "value_ly": 380000.0,
+  "change_pct": 18.19
+}
+```
+
+Mobile: render dual bar or label `SAR 449K vs LY 380K (+18%)`.
+
+### 11.2 LINK widget — jump to another dashboard / module
+
+**Desk row:**
+
+| Field | Value |
+|-------|-------|
+| Widget Key | `goto_receivables` |
+| Widget Type | `LINK` |
+| Module Key | `receivables` |
+| Dashboard ID | `home` (board where button appears) |
+| Config JSON | see below |
+
+Navigate to **another dashboard board**:
+
+```json
+{
+  "action": {
+    "type": "navigate",
+    "target": "dashboard",
+    "dashboard_id": "receivables_home"
+  }
+}
+```
+
+Navigate to **module screen** (tabs):
+
+```json
+{
+  "action": {
+    "type": "navigate",
+    "target": "module",
+    "route_key": "receivables",
+    "screen": "dashboard"
+  }
+}
+```
+
+**Mobile handler:**
+
+```typescript
+function onLinkWidgetTap(action: WidgetAction, boards: DashboardBoard[]) {
+  if (action.target === 'dashboard') {
+    setActiveDashboardId(action.dashboard_id);
+    return;
+  }
+  if (action.target === 'module') {
+    router.push(`/${action.route_key}/${action.screen ?? 'dashboard'}`);
+  }
+}
+```
+
+LINK widgets skip data loading — read `action` from bootstrap `dashboards[].widgets[]` or call `get_dashboard_widget_data` once to resolve action.
+
+### 11.3 Multiple dashboard boards
+
+**Desk — Mobile App Profile:**
+
+1. **Dashboard Boards** table — one row per board (`home`, `receivables_home`, …)
+2. **Default Dashboard** — e.g. `home` (opening board)
+3. **Dashboard Widgets** — set **Dashboard ID** on each widget row
+
+**Bootstrap response:**
+
+```json
+{
+  "context": { "default_dashboard": "home" },
+  "dashboards": [
+    {
+      "key": "home",
+      "label": "Sales Home",
+      "widgets": [ { "key": "sales_card", "widget_type": "PIE" }, { "key": "goto_receivables", "widget_type": "LINK" } ]
+    },
+    {
+      "key": "receivables_home",
+      "label": "Receivables",
+      "widgets": [ { "key": "receivables_card", "widget_type": "LIST" } ]
+    }
+  ],
+  "dashboard": [ "...default board widgets (backward compat)..." ]
+}
+```
+
+**Mobile:**
+
+```typescript
+const [activeBoard, setActiveBoard] = useState(bootstrap.context.default_dashboard);
+const board = bootstrap.dashboards.find((b) => b.key === activeBoard);
+// render board.widgets
+```
+
+Tab bar or segment control can list `bootstrap.dashboards[]` by `label`.
+
+---
+
 ## Related
 
 - [MOBILE_PLATFORM_API_V2.md](./MOBILE_PLATFORM_API_V2.md) — v2 bootstrap + dynamic dashboard widget data

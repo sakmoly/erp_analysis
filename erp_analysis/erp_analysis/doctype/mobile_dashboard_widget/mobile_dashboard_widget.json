@@ -9,6 +9,7 @@
   "widget_key",
   "label",
   "widget_type",
+  "dashboard_id",
   "metric_key",
   "module_key",
   "dimension_key",
@@ -37,7 +38,14 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Widget Type",
-   "options": "KPI\nBAR\nLINE\nPIE\nDONUT\nTABLE\nRANKING\nMATRIX\nLIST"
+   "options": "KPI\nBAR\nLINE\nPIE\nDONUT\nTABLE\nRANKING\nMATRIX\nLIST\nLINK"
+  },
+  {
+   "description": "Dashboard board key this widget belongs to (e.g. home, receivables_home).",
+   "fieldname": "dashboard_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Dashboard ID"
   },
   {
    "fieldname": "metric_key",

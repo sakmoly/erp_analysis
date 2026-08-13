@@ -81,6 +81,7 @@ def get_sales_analysis(
 	limit: Optional[int] = None,
 	order: Optional[str] = None,
 	company: Optional[str] = None,
+	compare: Optional[str] = None,
 	**kwargs,
 ):
 	"""Generic sales analysis grouped by a logical dimension."""
@@ -100,4 +101,5 @@ def get_sales_analysis(
 		filters=get_arg("filters", filters),
 		limit=to_int(get_arg("limit", limit), 50),
 		order=get_arg("order", order) or "desc",
+		compare=get_arg("compare", compare),
 	)

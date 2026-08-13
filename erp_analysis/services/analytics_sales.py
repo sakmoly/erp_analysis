@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import get_first_day, getdate, nowdate
+from frappe.utils import add_years, get_first_day, getdate, nowdate
 
 from erp_analysis.permissions.access_profile import resolve_territory_scope, si_territory_sql
 from erp_analysis.services.analytics_dimensions import (
@@ -36,6 +36,9 @@ METRIC_LABELS = {
 }
 
 
+ALLOWED_COMPARE = frozenset({"ly"})
+
+
 def get_sales_analysis(
 	user: str,
 	company: Optional[str] = None,
@@ -47,6 +50,7 @@ def get_sales_analysis(
 	filters: Any = None,
 	limit: int = 50,
 	order: str = "desc",
+	compare: Optional[str] = None,
 ) -> dict[str, Any]:
 	if secondary_dimension:
 		frappe.throw(_("secondary_dimension is not supported yet"), frappe.ValidationError)
@@ -68,6 +72,9 @@ def get_sales_analysis(
 
 	parsed_filters = parse_logical_filters(filters)
 	validated_filters = validate_logical_filters(user, company, parsed_filters)
+	compare_key = (compare or "").strip().lower() or None
+	if compare_key and compare_key not in ALLOWED_COMPARE:
+		frappe.throw(_("Unsupported compare mode: {0}").format(compare), frappe.ValidationError)
 
 	rows = _query_sales_analysis(
 		company=company,
@@ -79,6 +86,21 @@ def get_sales_analysis(
 		limit=limit,
 		order=order,
 	)
+
+	if compare_key == "ly":
+		ly_start = add_years(start, -1)
+		ly_end = add_years(end, -1)
+		ly_rows = _query_sales_analysis(
+			company=company,
+			from_date=ly_start,
+			to_date=ly_end,
+			dimension_row=dim_row,
+			metric=metric,
+			validated_filters=validated_filters,
+			limit=max(limit, 200),
+			order=order,
+		)
+		rows = _merge_compare_ly(rows, ly_rows)
 
 	return {
 		"data": rows,
@@ -92,8 +114,37 @@ def get_sales_analysis(
 			"company": company,
 			"count": len(rows),
 			"filters": parsed_filters,
+			"compare": compare_key,
+			"compare_from_date": str(add_years(start, -1)) if compare_key == "ly" else None,
+			"compare_to_date": str(add_years(end, -1)) if compare_key == "ly" else None,
 		},
 	}
+
+
+def _pct_change(current: float, previous: float) -> Optional[float]:
+	if previous <= 0:
+		return None if current <= 0 else 100.0
+	return round((current - previous) / previous * 100, 2)
+
+
+def _merge_compare_ly(
+	current_rows: list[dict[str, Any]],
+	ly_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+	ly_map = {
+		str(row.get("dimension_value")): float(row.get("metric_value") or 0)
+		for row in ly_rows
+		if row.get("dimension_value") not in (None, "")
+	}
+	for row in current_rows:
+		dim_val = row.get("dimension_value")
+		current = float(row.get("metric_value") or 0)
+		if dim_val is None or str(dim_val) == "":
+			continue
+		ly_val = ly_map.get(str(dim_val))
+		row["metric_value_ly"] = round(ly_val, 2) if ly_val is not None else None
+		row["change_pct"] = _pct_change(current, ly_val) if ly_val is not None else None
+	return current_rows
 
 
 def _resolve_dates(from_date: Optional[str], to_date: Optional[str]) -> tuple[date, date]:

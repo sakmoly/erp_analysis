@@ -31,9 +31,14 @@ class MobileAppProfile(Document):
 	def _validate_child_rows(self):
 		from erp_analysis.services.mobile_dimensions import validate_dimension_definition
 
+		def _val(row, field: str):
+			if isinstance(row, dict):
+				return row.get(field)
+			return getattr(row, field, None)
+
 		seen_modules: set[str] = set()
 		for row in self.modules or []:
-			key = (row.module_key or "").strip().lower()
+			key = (_val(row, "module_key") or "").strip().lower()
 			if not key:
 				frappe.throw(_("Module Key is required on all module rows"))
 			if key in seen_modules:
@@ -42,7 +47,7 @@ class MobileAppProfile(Document):
 
 		seen_dimensions: set[str] = set()
 		for row in self.dimensions or []:
-			key = (row.dimension_key or "").strip().lower()
+			key = (_val(row, "dimension_key") or "").strip().lower()
 			if not key:
 				frappe.throw(_("Dimension Key is required on all dimension rows"))
 			if key in seen_dimensions:
@@ -51,10 +56,30 @@ class MobileAppProfile(Document):
 			validate_dimension_definition(row)
 
 		seen_widgets: set[str] = set()
+		seen_dashboards: set[str] = set()
+		for row in self.dashboards or []:
+			key = (_val(row, "dashboard_key") or "").strip().lower()
+			if not key:
+				frappe.throw(_("Dashboard Key is required on all dashboard board rows"))
+			if key in seen_dashboards:
+				frappe.throw(_("Duplicate dashboard key: {0}").format(key))
+			seen_dashboards.add(key)
+
+		default_board = (self.default_dashboard or "home").strip().lower()
+		if seen_dashboards and default_board and default_board not in seen_dashboards:
+			frappe.throw(_("Default Dashboard {0} is not defined in Dashboard Boards").format(self.default_dashboard))
+
 		for row in self.dashboard_widgets or []:
-			key = (row.widget_key or "").strip().lower()
+			key = (_val(row, "widget_key") or "").strip().lower()
 			if not key:
 				frappe.throw(_("Widget Key is required on all dashboard widget rows"))
 			if key in seen_widgets:
 				frappe.throw(_("Duplicate widget key: {0}").format(key))
 			seen_widgets.add(key)
+			board_id = (_val(row, "dashboard_id") or default_board or "home").strip().lower()
+			if seen_dashboards and board_id not in seen_dashboards:
+				frappe.throw(
+					_("Widget {0} references unknown dashboard_id: {1}").format(
+						_val(row, "widget_key"), _val(row, "dashboard_id")
+					)
+				)
