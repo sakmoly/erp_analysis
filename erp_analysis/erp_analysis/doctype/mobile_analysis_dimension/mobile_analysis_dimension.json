@@ -1,0 +1,124 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-08-13 13:30:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "dimension_key",
+  "label",
+  "enabled",
+  "source_doctype",
+  "source_field",
+  "source_mode",
+  "join_path_json",
+  "column_break_flags",
+  "data_type_override",
+  "allow_filter",
+  "allow_group_by",
+  "allow_sort",
+  "sort_order",
+  "value_api_key"
+ ],
+ "fields": [
+  {
+   "fieldname": "dimension_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Dimension Key",
+   "reqd": 1
+  },
+  {
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "source_doctype",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Source DocType",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "source_field",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Source Field"
+  },
+  {
+   "default": "FIELD",
+   "fieldname": "source_mode",
+   "fieldtype": "Select",
+   "label": "Source Mode",
+   "options": "FIELD\nSTANDARD\nDERIVED\nRELATION"
+  },
+  {
+   "fieldname": "join_path_json",
+   "fieldtype": "Code",
+   "label": "Join Path JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "column_break_flags",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "data_type_override",
+   "fieldtype": "Select",
+   "label": "Data Type Override",
+   "options": "\nLink\nSelect\nData\nInt\nFloat\nDate\nDatetime"
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_filter",
+   "fieldtype": "Check",
+   "label": "Allow Filter"
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_group_by",
+   "fieldtype": "Check",
+   "label": "Allow Group By"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_sort",
+   "fieldtype": "Check",
+   "label": "Allow Sort"
+  },
+  {
+   "default": "0",
+   "fieldname": "sort_order",
+   "fieldtype": "Int",
+   "label": "Sort Order"
+  },
+  {
+   "fieldname": "value_api_key",
+   "fieldtype": "Data",
+   "label": "Value API Key"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-13 13:30:00.000000",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "Mobile Analysis Dimension",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

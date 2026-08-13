@@ -1,0 +1,188 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "autoname": "field:profile_name",
+ "creation": "2026-08-13 13:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_identity",
+  "profile_name",
+  "business_type",
+  "enabled",
+  "company",
+  "column_break_identity",
+  "default_dashboard",
+  "app_title",
+  "app_subtitle",
+  "logo",
+  "sec_locale",
+  "primary_locale",
+  "currency_source",
+  "settings_json",
+  "sec_modules",
+  "modules",
+  "sec_dimensions",
+  "dimensions",
+  "sec_dashboard",
+  "dashboard_widgets"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_identity",
+   "fieldtype": "Section Break",
+   "label": "Identity"
+  },
+  {
+   "fieldname": "profile_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Profile Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "B2B",
+   "fieldname": "business_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Business Type",
+   "options": "B2B\nGENERAL_RETAIL\nFASHION_RETAIL\nSUPERMARKET\nPOS_RETAIL\nHYBRID"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "description": "Optional company scope. Leave blank for a global profile template.",
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "default_dashboard",
+   "fieldtype": "Data",
+   "label": "Default Dashboard"
+  },
+  {
+   "fieldname": "app_title",
+   "fieldtype": "Data",
+   "label": "App Title"
+  },
+  {
+   "fieldname": "app_subtitle",
+   "fieldtype": "Data",
+   "label": "App Subtitle"
+  },
+  {
+   "fieldname": "logo",
+   "fieldtype": "Attach Image",
+   "label": "Logo"
+  },
+  {
+   "fieldname": "sec_locale",
+   "fieldtype": "Section Break",
+   "label": "Locale"
+  },
+  {
+   "default": "en",
+   "fieldname": "primary_locale",
+   "fieldtype": "Data",
+   "label": "Primary Locale"
+  },
+  {
+   "default": "Company Default",
+   "fieldname": "currency_source",
+   "fieldtype": "Select",
+   "label": "Currency Source",
+   "options": "Company Default\nSite Default\nProfile"
+  },
+  {
+   "description": "Advanced profile overrides (admin only).",
+   "fieldname": "settings_json",
+   "fieldtype": "Code",
+   "label": "Settings JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "sec_modules",
+   "fieldtype": "Section Break",
+   "label": "Modules"
+  },
+  {
+   "fieldname": "modules",
+   "fieldtype": "Table",
+   "label": "Modules",
+   "options": "Mobile App Module"
+  },
+  {
+   "fieldname": "sec_dimensions",
+   "fieldtype": "Section Break",
+   "label": "Dimensions"
+  },
+  {
+   "fieldname": "dimensions",
+   "fieldtype": "Table",
+   "label": "Dimensions",
+   "options": "Mobile Analysis Dimension"
+  },
+  {
+   "fieldname": "sec_dashboard",
+   "fieldtype": "Section Break",
+   "label": "Dashboard Widgets"
+  },
+  {
+   "fieldname": "dashboard_widgets",
+   "fieldtype": "Table",
+   "label": "Dashboard Widgets",
+   "options": "Mobile Dashboard Widget"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-13 13:30:00.000000",
+ "modified_by": "Administrator",
+ "module": "ERP Analysis",
+ "name": "Mobile App Profile",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Mobile Dashboard Admin",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

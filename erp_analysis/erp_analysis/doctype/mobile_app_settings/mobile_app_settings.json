@@ -39,6 +39,7 @@
   "sec_apis",
   "disabled_api_methods",
   "sec_advanced",
+  "default_mobile_app_profile",
   "dashboards_json"
  ],
  "fields": [
@@ -234,6 +235,13 @@
    "fieldname": "sec_advanced",
    "fieldtype": "Section Break",
    "label": "Advanced"
+  },
+  {
+   "description": "Site-wide fallback when Access Profile has no Mobile App Profile link. Does not override existing module checkboxes until a profile is linked on Access Profile.",
+   "fieldname": "default_mobile_app_profile",
+   "fieldtype": "Link",
+   "label": "Default Mobile App Profile",
+   "options": "Mobile App Profile"
   },
   {
    "description": "Optional JSON array to override default home dashboards/widgets.",

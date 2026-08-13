@@ -13,6 +13,7 @@
   "approve_territories",
   "branch",
   "role_profile",
+  "mobile_app_profile",
   "enabled",
   "sec_overrides",
   "allow_view_all_sales",
@@ -70,6 +71,13 @@
    "fieldtype": "Link",
    "label": "Role Profile",
    "options": "Role Profile"
+  },
+  {
+   "description": "Optional mobile presentation profile. When blank, Mobile App Settings and code defaults apply.",
+   "fieldname": "mobile_app_profile",
+   "fieldtype": "Link",
+   "label": "Mobile App Profile",
+   "options": "Mobile App Profile"
   },
   {
    "default": "1",
