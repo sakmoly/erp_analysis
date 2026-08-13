@@ -12,7 +12,7 @@ from erp_analysis.services.analytics_dimensions import (
 
 class TestAnalyticsPhaseD(FrappeTestCase):
 	def test_get_dimensions_returns_list(self):
-		dims = list_effective_dimensions(self.session.user)
+		dims = list_effective_dimensions(frappe.session.user)
 		self.assertIsInstance(dims, list)
 		for row in dims:
 			self.assertIn("key", row)
@@ -25,7 +25,7 @@ class TestAnalyticsPhaseD(FrappeTestCase):
 
 	def test_unknown_dimension_raises(self):
 		with self.assertRaises(frappe.ValidationError):
-			resolve_effective_dimension(self.session.user, None, "not_a_real_dimension_xyz")
+			resolve_effective_dimension(frappe.session.user, None, "not_a_real_dimension_xyz")
 
 	def test_analytics_endpoints_not_guest(self):
 		for path in (
@@ -39,12 +39,12 @@ class TestAnalyticsPhaseD(FrappeTestCase):
 	def test_sales_analysis_service_shape(self):
 		from erp_analysis.services.analytics_sales import get_sales_analysis
 
-		dims = list_effective_dimensions(self.session.user)
+		dims = list_effective_dimensions(frappe.session.user)
 		if not dims:
 			self.skipTest("No enabled dimensions on site")
 
 		result = get_sales_analysis(
-			user=self.session.user,
+			user=frappe.session.user,
 			dimension=dims[0]["key"],
 			metric="net_sales",
 			limit=5,

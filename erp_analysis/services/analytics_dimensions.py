@@ -160,8 +160,34 @@ def validate_logical_filters(
 		row = resolve_effective_dimension(user, company, dim_key)
 		if not row.get("allow_filter"):
 			frappe.throw(_("Dimension {0} is not filterable").format(dim_key), frappe.ValidationError)
+		_validate_filter_scope(user, company, dim_key, values)
 		validated.append((row, values))
 	return validated
+
+
+def _validate_filter_scope(
+	user: str,
+	company: Optional[str],
+	dimension_key: str,
+	values: list[Any],
+) -> None:
+	"""Reject filter values outside Access Profile company / territory scope."""
+	key = (dimension_key or "").strip().lower()
+	if key == "territory":
+		resolve_territory_scope(
+			requested_list=[str(v) for v in values if v is not None and str(v).strip()],
+			user=user,
+			company=company,
+			purpose="view",
+			module="sales",
+		)
+	elif key == "company" and company:
+		for value in values:
+			if str(value) != company:
+				frappe.throw(
+					_("Company {0} is outside your access scope").format(value),
+					frappe.PermissionError,
+				)
 
 
 def get_effective_dimension_values(

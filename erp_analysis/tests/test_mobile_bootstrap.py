@@ -9,16 +9,16 @@ from erp_analysis.services.mobile_bootstrap import BOOTSTRAP_SCHEMA_VERSION, bui
 
 class TestMobileBootstrap(FrappeTestCase):
 	def test_guest_cannot_build_bootstrap(self):
-		original = self.session.user
+		original = frappe.session.user
 		try:
-			self.session.user = "Guest"
+			frappe.set_user("Guest")
 			with self.assertRaises(frappe.AuthenticationError):
 				build_mobile_bootstrap()
 		finally:
-			self.session.user = original
+			frappe.set_user(original)
 
 	def test_authenticated_bootstrap_shape(self):
-		payload = build_mobile_bootstrap(user=self.session.user)
+		payload = build_mobile_bootstrap(user=frappe.session.user)
 		self.assertEqual(payload["schema_version"], BOOTSTRAP_SCHEMA_VERSION)
 		self.assertIn("user", payload)
 		self.assertIn("modules", payload)
@@ -30,7 +30,7 @@ class TestMobileBootstrap(FrappeTestCase):
 		self.assertIsInstance(payload["dimensions"], list)
 
 	def test_bootstrap_modules_are_dicts_with_key(self):
-		payload = build_mobile_bootstrap(user=self.session.user)
+		payload = build_mobile_bootstrap(user=frappe.session.user)
 		for mod in payload["modules"]:
 			self.assertIn("key", mod)
 			self.assertIn("enabled", mod)
