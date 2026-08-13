@@ -117,8 +117,10 @@ def build_profile_doc_dict(company: Optional[str] = None) -> dict[str, Any]:
 			{
 				"widget_key": "sales_card",
 				"label": "Sales Performance",
-				"widget_type": "LIST",
+				"widget_type": "PIE",
 				"module_key": "sales",
+				"metric_key": "net_sales",
+				"dimension_key": "territory",
 				"enabled": 1,
 				"sort_order": 0,
 			},

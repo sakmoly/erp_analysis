@@ -17,6 +17,7 @@ class TestApiAuthentication(FrappeTestCase):
 		"erp_analysis.collection.get_collection_dashboard",
 		"erp_analysis.analytics.get_dimensions",
 		"erp_analysis.api.get_mobile_bootstrap",
+		"erp_analysis.api.get_dashboard_widget_data",
 	)
 
 	_PUBLIC_METHODS = (

@@ -170,8 +170,54 @@ To wire UI screens, open the BA mobile repo in Cursor (or share its path) and re
 
 ---
 
+## 9. v2 migration (dynamic profile-driven home)
+
+**Status:** Backend ready. Mobile app still on v1 until it switches boot + widget loading.
+
+| | v1 (current mobile) | v2 (profile-driven) |
+|---|---------------------|---------------------|
+| Boot | `get_mobile_config` | `get_mobile_bootstrap` |
+| Home layout | `dashboards_json` / hard-coded widget ids | `bootstrap.dashboard[]` from Mobile App Profile |
+| Widget data | Fixed API per id (e.g. `sales_card` → `get_dashboard_kpis`) | `get_dashboard_widget_data?widget_key=...` |
+| Chart types | Not supported (all `expandable` / list) | `PIE`, `DONUT`, `BAR`, `LINE`, `RANKING` via analytics |
+| Desk users | Unaffected | Unaffected (no Access Profile = legacy behavior) |
+
+### Recommended mobile rollout
+
+1. Feature-flag v2 boot for Access Profile users only (e.g. when `bootstrap.context.profile` is set).
+2. Replace home widget loop: read `dashboard[]`, call `get_dashboard_widget_data` per `key`.
+3. Add renderers for `widget_type` / `meta.render_hint`.
+4. Keep v1 path as fallback when bootstrap returns no profile.
+
+### Example v2 home sequence
+
+```
+POST /api/method/erp_analysis.api.get_mobile_bootstrap
+  → dashboard: [{ key: "sales_card", widget_type: "PIE", ... }, ...]
+
+GET /api/method/erp_analysis.api.get_dashboard_widget_data?widget_key=sales_card&limit=8
+  → { chart: { series: [...] }, widget_type: "PIE" }
+
+GET /api/method/erp_analysis.api.get_dashboard_widget_data?widget_key=receivables_card
+  → { data: { ... legacy receivables shape ... }, widget_type: "LIST" }
+```
+
+### PRINTECHS-B2B test user
+
+Link an Access Profile to **`PRINTECHS-B2B`** manually in Desk. After mobile v2 migration, home should show PIE sales by territory, receivables list, inventory list — as configured in Mobile App Profile.
+
+Load or refresh the profile fixture (does not auto-link users):
+
+```bash
+bench --site <site> execute erp_analysis.scripts.load_printechs_b2b_profile.ensure_profile
+bench --site <site> execute erp_analysis.scripts.load_printechs_b2b_profile.ensure_profile --kwargs "{'update_existing': True}"
+```
+
+---
+
 ## Related
 
+- [MOBILE_PLATFORM_API_V2.md](./MOBILE_PLATFORM_API_V2.md) — v2 bootstrap + dynamic dashboard widget data
 - [BACKEND_MULTI_CLIENT_GUIDE.md](./BACKEND_MULTI_CLIENT_GUIDE.md)
 - [PHASE3_IMPLEMENTATION_PLAN.md](./PHASE3_IMPLEMENTATION_PLAN.md)
 - `erp_analysis/mobile_config.py` — `KNOWN_API_METHODS`, defaults

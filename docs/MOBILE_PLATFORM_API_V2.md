@@ -157,6 +157,81 @@ Disabled modules are omitted or returned with `enabled: false` per bootstrap bui
 
 When a Mobile App Profile is linked, `dashboard` lists widget metadata (`key`, `label`, `widget_type`, `module_key`, …). Legacy sites use widgets from Mobile App Settings `dashboards_json`.
 
+Each profile widget is loaded dynamically via **`get_dashboard_widget_data`** (see below). Legacy v1 home screens ignore `widget_type` and call hard-coded APIs per widget id.
+
+---
+
+## Dashboard widget data (v2 dynamic home)
+
+**Endpoint:** `GET/POST /api/method/erp_analysis.api.get_dashboard_widget_data`  
+**Auth:** Required (same as bootstrap)
+
+### Request
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `widget_key` | Yes | Bootstrap `dashboard[].key` (e.g. `sales_card`) |
+| `company` | No | Honored only when it matches Access Profile company |
+| `from_date` | No | ISO date; chart widgets only |
+| `to_date` | No | ISO date; chart widgets only |
+| `limit` | No | Max rows (default `10`) |
+
+The server resolves widget metadata from the user's Mobile App Profile (metric, dimension, `widget_type`) merged with code defaults in `WIDGET_DEFAULTS`.
+
+### Response shapes
+
+**Chart widgets** (`PIE`, `DONUT`, `BAR`, `LINE`, `RANKING`):
+
+```json
+{
+  "widget_key": "sales_card",
+  "widget_type": "PIE",
+  "label": "Sales Performance",
+  "chart": {
+    "series": [
+      {"label": "Riyadh", "value": 250000.0},
+      {"label": "Jeddah", "value": 125000.5}
+    ],
+    "metric": "net_sales",
+    "dimension": "territory"
+  },
+  "meta": {
+    "schema_version": 1,
+    "render_hint": "pie"
+  }
+}
+```
+
+**Legacy list/KPI widgets** (`LIST`, `KPI`, `TABLE`):
+
+```json
+{
+  "widget_key": "receivables_card",
+  "widget_type": "LIST",
+  "label": "Receivables",
+  "data": {},
+  "meta": {
+    "schema_version": 1,
+    "legacy_method": "erp_analysis.receivables.get_receivables_dashboard",
+    "render_hint": "list"
+  }
+}
+```
+
+`data` keeps the existing legacy API shape (unchanged).
+
+**MATRIX:** Returns `ValidationError` until secondary-dimension analytics is implemented.
+
+### Mobile home flow (v2)
+
+1. `get_mobile_bootstrap` → read `dashboard[]`
+2. For each widget, `GET get_dashboard_widget_data?widget_key=<key>`
+3. Render by `widget_type` / `meta.render_hint`:
+   - `PIE` / `DONUT` / `BAR` / `LINE` / `RANKING` → `chart.series`
+   - `LIST` / `KPI` / `TABLE` → `data` (legacy layout)
+
+Legacy v1 continues to use `get_mobile_config` + per-widget hard-coded APIs until the app migrates.
+
 ---
 
 ## Access guards (Phase G)

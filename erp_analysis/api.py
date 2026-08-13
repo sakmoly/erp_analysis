@@ -60,6 +60,30 @@ def get_mobile_bootstrap(company: str | None = None, **kwargs):
 	return build_mobile_bootstrap(company=company)
 
 
+@frappe.whitelist(methods=["GET", "POST"])
+def get_dashboard_widget_data(
+	widget_key: str | None = None,
+	company: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	limit: int | None = None,
+	**kwargs,
+):
+	"""Return chart/list data for one profile dashboard widget (v2 dynamic home)."""
+	from erp_analysis.services.mobile_widgets import get_dashboard_widget_data as _impl
+	from erp_analysis.utils.rpc import clean_kwargs, get_arg, to_int
+
+	clean_kwargs(kwargs)
+	return _impl(
+		widget_key=get_arg("widget_key", widget_key),
+		company=get_arg("company", company),
+		from_date=get_arg("from_date", from_date),
+		to_date=get_arg("to_date", to_date),
+		limit=to_int(get_arg("limit", limit), 10),
+		**kwargs,
+	)
+
+
 @frappe.whitelist()
 def get_my_access(user: str | None = None, company: str | None = None, **kwargs):
 	from erp_analysis.utils.rpc import clean_kwargs
