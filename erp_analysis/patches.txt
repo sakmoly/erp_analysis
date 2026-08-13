@@ -12,3 +12,5 @@ erp_analysis.patches.register_legacy_inventory_paths
 erp_analysis.patches.enable_all_phase3_modules
 erp_analysis.patches.fix_mobile_module_flags
 erp_analysis.patches.sync_mobile_access_registry
+erp_analysis.patches.create_printechs_b2b_mobile_profile
+erp_analysis.patches.sync_warehouse_desk_dn_permissions
