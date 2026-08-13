@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import frappe
 from frappe.utils import get_first_day, getdate, nowdate
 
+from erp_analysis.permissions.access_profile import resolve_territory_scope, si_territory_sql
 from erp_analysis.services.kpi.collection import get_collection_period_kpis
 
 
@@ -26,14 +27,23 @@ def _company_sql(company: Optional[str], alias: str = "pe") -> tuple[str, list[A
 	return f" AND {alias}.company = %s", [company]
 
 
+def _customer_territory_sql(
+	territories: Optional[List[str]],
+	alias: str = "c",
+) -> tuple[str, list[Any]]:
+	return si_territory_sql(territories, field=f"{alias}.territory")
+
+
 def get_collection_by_territory(
 	company: Optional[str] = None,
 	from_date: Optional[str] = None,
 	to_date: Optional[str] = None,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	start, end = _period_bounds(from_date, to_date)
 	company_sql, company_params = _company_sql(company)
+	terr_sql, terr_params = _customer_territory_sql(territories)
 
 	rows = frappe.db.sql(
 		f"""
@@ -48,11 +58,12 @@ def get_collection_by_territory(
 		  AND pe.payment_type = 'Receive'
 		  AND pe.posting_date BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		GROUP BY COALESCE(c.territory, 'Unassigned')
 		ORDER BY collected DESC
 		LIMIT %s
 		""",
-		tuple([start, end, *company_params, int(limit)]),
+		tuple([start, end, *company_params, *terr_params, int(limit)]),
 		as_dict=True,
 	)
 
@@ -72,6 +83,7 @@ def get_collection_by_customer(
 	to_date: Optional[str] = None,
 	territory: Optional[str] = None,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	start, end = _period_bounds(from_date, to_date)
 	company_sql, company_params = _company_sql(company)
@@ -80,6 +92,10 @@ def get_collection_by_customer(
 	if territory:
 		territory_sql = " AND c.territory = %s"
 		territory_params.append(territory)
+	elif territories:
+		terr_sql, terr_params = _customer_territory_sql(territories)
+		territory_sql = terr_sql
+		territory_params.extend(terr_params)
 
 	rows = frappe.db.sql(
 		f"""
@@ -124,13 +140,20 @@ def get_collection_dashboard_payload(
 	to_date: Optional[str] = None,
 	territory: Optional[str] = None,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, Any]:
 	start, end = _period_bounds(from_date, to_date)
+	if territories is None:
+		territories = resolve_territory_scope(
+			requested=territory, company=company, purpose="view", module="sales"
+		)
 	return {
-		"kpis": get_collection_period_kpis(company=company, as_of=end),
+		"kpis": get_collection_period_kpis(
+			company=company, as_of=end, territory=territory, territories=territories
+		),
 		"period": {"from_date": str(start), "to_date": str(end)},
 		"by_territory": get_collection_by_territory(
-			company=company, from_date=start, to_date=end, limit=limit
+			company=company, from_date=start, to_date=end, limit=limit, territories=territories
 		),
 		"by_customer": get_collection_by_customer(
 			company=company,
@@ -138,6 +161,7 @@ def get_collection_dashboard_payload(
 			to_date=end,
 			territory=territory,
 			limit=limit,
+			territories=territories if not territory else None,
 		),
 	}
 
@@ -145,13 +169,16 @@ def get_collection_dashboard_payload(
 def get_overdue_customers(
 	company: Optional[str] = None,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	company = company or frappe.defaults.get_user_default("Company")
 	if not company:
 		return []
 
+	terr_sql, terr_params = si_territory_sql(territories, field="si.territory")
+
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT
 			si.customer AS customer,
 			COALESCE(c.customer_name, si.customer) AS customer_name,
@@ -166,12 +193,13 @@ def get_overdue_customers(
 		WHERE si.docstatus = 1
 		  AND si.outstanding_amount > 0
 		  AND si.company = %s
+		  {terr_sql}
 		GROUP BY si.customer, c.customer_name, c.territory
 		HAVING overdue > 0
 		ORDER BY overdue DESC
 		LIMIT %s
 		""",
-		(company, int(limit)),
+		(company, *terr_params, int(limit)),
 		as_dict=True,
 	)
 
@@ -192,13 +220,24 @@ def get_unallocated_payments(
 	company: Optional[str] = None,
 	min_unallocated: float = 100.0,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	company = company or frappe.defaults.get_user_default("Company")
 	if not company:
 		return []
 
-	rows = frappe.db.sql(
+	party_join = ""
+	terr_sql = ""
+	terr_params: list[Any] = []
+	if territories:
+		party_join = """
+			INNER JOIN `tabCustomer` c
+				ON c.name = pe.party AND pe.party_type = 'Customer'
 		"""
+		terr_sql, terr_params = _customer_territory_sql(territories)
+
+	rows = frappe.db.sql(
+		f"""
 		SELECT
 			pe.name AS payment_entry,
 			pe.party,
@@ -206,15 +245,17 @@ def get_unallocated_payments(
 			COALESCE(pe.base_paid_amount, 0) AS paid_amount,
 			COALESCE(pe.unallocated_amount, 0) AS unallocated_amount
 		FROM `tabPayment Entry` pe
+		{party_join}
 		WHERE pe.docstatus = 1
 		  AND pe.payment_type = 'Receive'
 		  AND pe.party_type = 'Customer'
 		  AND pe.company = %s
 		  AND pe.unallocated_amount >= %s
+		  {terr_sql}
 		ORDER BY pe.unallocated_amount DESC
 		LIMIT %s
 		""",
-		(company, float(min_unallocated), int(limit)),
+		(company, float(min_unallocated), *terr_params, int(limit)),
 		as_dict=True,
 	)
 
@@ -234,10 +275,13 @@ def get_collection_attention_payload(
 	company: Optional[str] = None,
 	min_unallocated: float = 100.0,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, Any]:
+	if territories is None:
+		territories = resolve_territory_scope(company=company, purpose="view", module="receivables")
 	return {
-		"overdue_customers": get_overdue_customers(company=company, limit=limit),
+		"overdue_customers": get_overdue_customers(company=company, limit=limit, territories=territories),
 		"unallocated_payments": get_unallocated_payments(
-			company=company, min_unallocated=min_unallocated, limit=limit
+			company=company, min_unallocated=min_unallocated, limit=limit, territories=territories
 		),
 	}

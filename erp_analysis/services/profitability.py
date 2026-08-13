@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import frappe
 from frappe.utils import get_first_day, getdate, nowdate
 
+from erp_analysis.permissions.access_profile import resolve_territory_scope, si_territory_sql
 from erp_analysis.services.kpi.gross_profit import _gp_block, _sales_and_cogs, get_gross_profit_period_kpis
 
 
@@ -39,6 +40,7 @@ def _breakdown_from_dashboard(
 	end: date,
 	dimension: str,
 	limit: int,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	cols = _dashboard_columns()
 	if not cols:
@@ -63,6 +65,11 @@ def _breakdown_from_dashboard(
 		company_sql = " AND company = %s"
 		params.append(company)
 
+	terr_sql, terr_params = "", []
+	if territories and "Territory" in cols:
+		terr_sql, terr_params = si_territory_sql(territories, field="Territory")
+		params.extend(terr_params)
+
 	rows = frappe.db.sql(
 		f"""
 		SELECT
@@ -72,6 +79,7 @@ def _breakdown_from_dashboard(
 		FROM `tabSalesDashBoard`
 		WHERE `{date_col}` BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		GROUP BY COALESCE(`{col}`, 'Unassigned')
 		ORDER BY sales DESC
 		LIMIT %s
@@ -103,12 +111,15 @@ def _breakdown_from_si(
 	end: date,
 	dimension: str,
 	limit: int,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	company_sql = ""
 	params: list[Any] = [start, end]
 	if company:
 		company_sql = " AND si.company = %s"
 		params.append(company)
+	terr_sql, terr_params = si_territory_sql(territories, field="si.territory")
+	params.extend(terr_params)
 
 	if dimension == "territory":
 		group_sql = "COALESCE(si.territory, 'Unassigned')"
@@ -128,6 +139,7 @@ def _breakdown_from_si(
 		WHERE si.docstatus = 1
 		  AND si.posting_date BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		GROUP BY {group_sql}
 		ORDER BY sales DESC
 		LIMIT %s
@@ -158,11 +170,12 @@ def get_dimension_breakdown(
 	end: date,
 	dimension: str,
 	limit: int = 10,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
-	rows = _breakdown_from_dashboard(company, start, end, dimension, limit)
+	rows = _breakdown_from_dashboard(company, start, end, dimension, limit, territories)
 	if rows:
 		return rows
-	return _breakdown_from_si(company, start, end, dimension, limit)
+	return _breakdown_from_si(company, start, end, dimension, limit, territories)
 
 
 def get_gross_profit_dashboard_payload(
@@ -171,21 +184,24 @@ def get_gross_profit_dashboard_payload(
 	from_date: Optional[str] = None,
 	to_date: Optional[str] = None,
 	limit: int = 10,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, Any]:
 	start, end = _period_bounds(period, from_date, to_date)
-	period_sales, period_cogs = _sales_and_cogs(company, start, end)
+	if territories is None:
+		territories = resolve_territory_scope(company=company, purpose="view", module="sales")
+	period_sales, period_cogs = _sales_and_cogs(company, start, end, territories)
 	period_gp, period_gp_pct = _gp_block(period_sales, period_cogs)
 
 	return {
 		"period": {"from_date": str(start), "to_date": str(end)},
 		"kpis": {
-			**get_gross_profit_period_kpis(company=company, as_of=end),
+			**get_gross_profit_period_kpis(company=company, as_of=end, territories=territories),
 			"period_sales": round(period_sales, 2),
 			"period_cogs": round(period_cogs, 2),
 			"period_gp": period_gp,
 			"period_gp_pct": period_gp_pct,
 		},
-		"by_territory": get_dimension_breakdown(company, start, end, "territory", limit),
-		"by_brand": get_dimension_breakdown(company, start, end, "brand", limit),
-		"by_division": get_dimension_breakdown(company, start, end, "division", limit),
+		"by_territory": get_dimension_breakdown(company, start, end, "territory", limit, territories),
+		"by_brand": get_dimension_breakdown(company, start, end, "brand", limit, territories),
+		"by_division": get_dimension_breakdown(company, start, end, "division", limit, territories),
 	}

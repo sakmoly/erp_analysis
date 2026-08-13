@@ -6,6 +6,7 @@ from typing import Optional
 
 import frappe
 
+from erp_analysis.access_context import guard_mobile_api
 from erp_analysis.services.collection import (
 	get_collection_attention_payload,
 	get_collection_dashboard_payload,
@@ -26,7 +27,14 @@ def get_collection_dashboard(
 
 	Data source: submitted Payment Entry (Receive), allocated amounts for breakdown tables.
 	"""
-	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	ctx = guard_mobile_api(
+		company=company,
+		module_key="collection",
+		scope_module="sales",
+		territory=territory,
+	)
+	company = ctx["company"]
+	territories = ctx["view_territory_scope"]
 	from_date = _get_arg("from_date", from_date)
 	to_date = _get_arg("to_date", to_date)
 	territory = _get_arg("territory", territory)
@@ -39,6 +47,7 @@ def get_collection_dashboard(
 			to_date=to_date,
 			territory=territory,
 			limit=limit,
+			territories=territories,
 		)
 	except Exception:
 		frappe.log_error(title="collection.get_collection_dashboard", message=frappe.get_traceback())
@@ -59,7 +68,9 @@ def get_collection_attention(
 	"""
 	Collection attention lists — overdue customers and large unallocated payments.
 	"""
-	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	ctx = guard_mobile_api(company=company, module_key="collection", scope_module="receivables")
+	company = ctx["company"]
+	territories = ctx["view_territory_scope"]
 	min_unallocated = float(_get_arg("min_unallocated", min_unallocated) or 100)
 	limit = _to_int(_get_arg("limit", limit), 20)
 
@@ -68,6 +79,7 @@ def get_collection_attention(
 			company=company,
 			min_unallocated=min_unallocated,
 			limit=limit,
+			territories=territories,
 		)
 	except Exception:
 		frappe.log_error(title="collection.get_collection_attention", message=frappe.get_traceback())

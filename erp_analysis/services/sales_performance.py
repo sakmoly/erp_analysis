@@ -3,12 +3,30 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import frappe
 from frappe.utils import add_days, add_months, get_first_day, get_last_day, getdate, nowdate
 
+from erp_analysis.permissions.access_profile import si_territory_sql
 from erp_analysis.utils.salesperson import resolve_salesperson_name
+
+
+def _dashboard_territory_sql(
+	territories: Optional[List[str]],
+	cols: set[str],
+) -> tuple[str, list[Any]]:
+	if not territories:
+		return "", []
+	for candidate in ("Territory", "territory"):
+		if candidate in cols:
+			field = f"`{candidate}`"
+			return si_territory_sql(territories, field=field)
+	return "", []
+
+
+def _si_territory_sql(territories: Optional[List[str]]) -> tuple[str, list[Any]]:
+	return si_territory_sql(territories, field="si.territory")
 
 
 SALESPERSON_ROW_FIELDS = (
@@ -211,7 +229,11 @@ def _product_group_spec(group_by: str) -> tuple[str, str, str]:
 
 
 def _product_metrics_from_dashboard(
-	company: Optional[str], start: date, end: date, group_by: str
+	company: Optional[str],
+	start: date,
+	end: date,
+	group_by: str,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, dict[str, Any]]:
 	cols = _dashboard_columns()
 	if not cols:
@@ -226,6 +248,7 @@ def _product_metrics_from_dashboard(
 		return {}
 
 	company_sql, company_params = _company_filter_dashboard(company, cols)
+	terr_sql, terr_params = _dashboard_territory_sql(territories, cols)
 	qty_select = f"COALESCE(SUM(`{qty_col}`), 0) AS sold_qty," if qty_col and qty_col in cols else "0 AS sold_qty,"
 	gp_select = (
 		f"COALESCE(SUM(`{sales_col}`), 0) - COALESCE(SUM(`{cogs_col}`), 0) AS gp,"
@@ -251,9 +274,10 @@ def _product_metrics_from_dashboard(
 		FROM `tabSalesDashBoard`
 		WHERE `{date_col}` BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		GROUP BY COALESCE(`{col_name}`, 'Unassigned')
 		""",
-		tuple([start, end, *company_params]),
+		tuple([start, end, *company_params, *terr_params]),
 		as_dict=True,
 	)
 
@@ -272,7 +296,11 @@ def _product_metrics_from_dashboard(
 
 
 def _product_metrics_from_sales_invoice(
-	company: Optional[str], start: date, end: date, group_by: str
+	company: Optional[str],
+	start: date,
+	end: date,
+	group_by: str,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, dict[str, Any]]:
 	_, _, group_sql = _product_group_spec(group_by)
 	company_sql = ""
@@ -280,6 +308,8 @@ def _product_metrics_from_sales_invoice(
 	if company:
 		company_sql = " AND si.company = %s"
 		params.append(company)
+	terr_sql, terr_params = _si_territory_sql(territories)
+	params.extend(terr_params)
 
 	rows = frappe.db.sql(
 		f"""
@@ -301,6 +331,7 @@ def _product_metrics_from_sales_invoice(
 		WHERE si.docstatus = 1
 		  AND si.posting_date BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		GROUP BY {group_sql}
 		""",
 		tuple(params),
@@ -357,10 +388,15 @@ def _merge_product_metric_pair(
 
 
 def _merged_product_rows(
-	company: Optional[str], start: date, end: date, group_by: str, limit: int
+	company: Optional[str],
+	start: date,
+	end: date,
+	group_by: str,
+	limit: int,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
-	dashboard = _product_metrics_from_dashboard(company, start, end, group_by)
-	si = _product_metrics_from_sales_invoice(company, start, end, group_by)
+	dashboard = _product_metrics_from_dashboard(company, start, end, group_by, territories)
+	si = _product_metrics_from_sales_invoice(company, start, end, group_by, territories)
 	company_rate = _company_dashboard_gp_rate(company, start, end) if dashboard else 0.0
 
 	merged: list[dict[str, Any]] = []
@@ -374,10 +410,14 @@ def _merged_product_rows(
 
 
 def _product_sales_ly_map(
-	company: Optional[str], ly_start: date, ly_end: date, group_by: str
+	company: Optional[str],
+	ly_start: date,
+	ly_end: date,
+	group_by: str,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, float]:
-	dashboard = _product_metrics_from_dashboard(company, ly_start, ly_end, group_by)
-	si = _product_metrics_from_sales_invoice(company, ly_start, ly_end, group_by)
+	dashboard = _product_metrics_from_dashboard(company, ly_start, ly_end, group_by, territories)
+	si = _product_metrics_from_sales_invoice(company, ly_start, ly_end, group_by, territories)
 	company_rate = _company_dashboard_gp_rate(company, ly_start, ly_end) if dashboard else 0.0
 
 	out: dict[str, float] = {}
@@ -394,9 +434,10 @@ def get_salesperson_ranking(
 	from_date: Optional[str] = None,
 	to_date: Optional[str] = None,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, Any]:
 	start, end = _period_bounds(period, from_date, to_date)
-	rows = _merged_salesperson_rows(company, start, end, limit)
+	rows = _merged_salesperson_rows(company, start, end, limit, territories)
 
 	rows = _enrich_salesperson_rows(
 		rows,
@@ -417,12 +458,16 @@ def get_salesperson_ranking(
 
 
 def _merged_salesperson_rows(
-	company: Optional[str], start: date, end: date, limit: int
+	company: Optional[str],
+	start: date,
+	end: date,
+	limit: int,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	"""Merge SalesDashBoard + Sales Invoice totals — SI wins when dashboard is incomplete."""
 	merge_cap = max(int(limit) * 10, 200)
-	dashboard_rows = _salesperson_from_dashboard(company, start, end, merge_cap)
-	si_rows = _salesperson_from_sales_invoice(company, start, end, merge_cap)
+	dashboard_rows = _salesperson_from_dashboard(company, start, end, merge_cap, territories)
+	si_rows = _salesperson_from_sales_invoice(company, start, end, merge_cap, territories)
 
 	dashboard_by_key: dict[str, dict[str, Any]] = {}
 	for row in dashboard_rows:
@@ -521,7 +566,11 @@ def _enrich_salesperson_rows(
 
 
 def _salesperson_from_dashboard(
-	company: Optional[str], start: date, end: date, limit: int
+	company: Optional[str],
+	start: date,
+	end: date,
+	limit: int,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	cols = _dashboard_columns()
 	if not cols:
@@ -534,6 +583,7 @@ def _salesperson_from_dashboard(
 		return []
 
 	company_sql, company_params = _company_filter_dashboard(company, cols)
+	terr_sql, terr_params = _dashboard_territory_sql(territories, cols)
 
 	rows = frappe.db.sql(
 		f"""
@@ -544,11 +594,12 @@ def _salesperson_from_dashboard(
 		FROM `tabSalesDashBoard`
 		WHERE `{date_col}` BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		GROUP BY COALESCE(`{person_col}`, 'Unassigned')
 		ORDER BY total_sales DESC
 		LIMIT %s
 		""",
-		tuple([start, end, *company_params, int(limit)]),
+		tuple([start, end, *company_params, *terr_params, int(limit)]),
 		as_dict=True,
 	)
 
@@ -563,13 +614,19 @@ def _salesperson_from_dashboard(
 
 
 def _salesperson_from_sales_invoice(
-	company: Optional[str], start: date, end: date, limit: int
+	company: Optional[str],
+	start: date,
+	end: date,
+	limit: int,
+	territories: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
 	company_sql = ""
 	params: list[Any] = [start, end]
 	if company:
 		company_sql = " AND si.company = %s"
 		params.append(company)
+	terr_sql, terr_params = _si_territory_sql(territories)
+	params.extend(terr_params)
 
 	if frappe.db.table_exists("Sales Team"):
 		rows = frappe.db.sql(
@@ -583,6 +640,7 @@ def _salesperson_from_sales_invoice(
 			WHERE si.docstatus = 1
 			  AND si.posting_date BETWEEN %s AND %s
 			  {company_sql}
+			  {terr_sql}
 			GROUP BY COALESCE(st.sales_person, 'Unassigned')
 			ORDER BY total_sales DESC
 			LIMIT %s
@@ -610,6 +668,7 @@ def _salesperson_from_sales_invoice(
 		WHERE si.docstatus = 1
 		  AND si.posting_date BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		GROUP BY COALESCE(si.owner, 'Unassigned')
 		ORDER BY total_sales DESC
 		LIMIT %s
@@ -1036,6 +1095,7 @@ def get_product_ranking(
 	from_date: Optional[str] = None,
 	to_date: Optional[str] = None,
 	limit: int = 20,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, Any]:
 	start, end = _period_bounds(period, from_date, to_date)
 	ly_start, ly_end = _ly_period(start, end)
@@ -1043,8 +1103,8 @@ def get_product_ranking(
 	if group_key not in ("item", "item_group", "brand"):
 		group_key = "brand"
 
-	rows = _merged_product_rows(company, start, end, group_key, limit)
-	sales_ly_map = _product_sales_ly_map(company, ly_start, ly_end, group_key)
+	rows = _merged_product_rows(company, start, end, group_key, limit, territories)
+	sales_ly_map = _product_sales_ly_map(company, ly_start, ly_end, group_key, territories)
 
 	enriched: list[dict[str, Any]] = []
 	for row in rows:
@@ -1070,6 +1130,7 @@ def get_salesperson_invoices(
 	to_date: Optional[str] = None,
 	limit: int = 50,
 	offset: int = 0,
+	territories: Optional[List[str]] = None,
 ) -> dict[str, Any]:
 	"""Invoice drill-down for a salesperson — mobile-safe alternative to frappe.client.get_list."""
 	start, end = _period_bounds(None, from_date, to_date)
@@ -1087,6 +1148,8 @@ def get_salesperson_invoices(
 	if company:
 		company_sql = " AND si.company = %s"
 		params.append(company)
+	terr_sql, terr_params = _si_territory_sql(territories)
+	params.extend(terr_params)
 
 	rows = frappe.db.sql(
 		f"""
@@ -1104,6 +1167,7 @@ def get_salesperson_invoices(
 		  AND st.sales_person = %s
 		  AND si.posting_date BETWEEN %s AND %s
 		  {company_sql}
+		  {terr_sql}
 		ORDER BY si.posting_date DESC, si.name DESC
 		LIMIT %s OFFSET %s
 		""",

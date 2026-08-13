@@ -6,6 +6,7 @@ from typing import Optional
 
 import frappe
 
+from erp_analysis.access_context import guard_mobile_api
 from erp_analysis.services import profitability as profitability_service
 from erp_analysis.utils.rpc import get_arg as _get_arg, to_int as _to_int
 
@@ -19,7 +20,9 @@ def get_gross_profit_dashboard(
 	limit: Optional[int] = None,
 ):
 	"""Gross profit dashboard — MTD/YTD KPIs plus territory/brand/division breakdown."""
-	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	ctx = guard_mobile_api(company=company, module_key="profitability", scope_module="sales")
+	company = ctx["company"]
+	territories = ctx["view_territory_scope"]
 	period = _get_arg("period", period)
 	from_date = _get_arg("from_date", from_date)
 	to_date = _get_arg("to_date", to_date)
@@ -32,6 +35,7 @@ def get_gross_profit_dashboard(
 			from_date=from_date,
 			to_date=to_date,
 			limit=limit,
+			territories=territories,
 		)
 	except Exception:
 		frappe.log_error(title="profitability.get_gross_profit_dashboard", message=frappe.get_traceback())

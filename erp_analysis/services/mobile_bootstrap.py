@@ -9,8 +9,7 @@ from frappe.utils import get_url
 
 from erp_analysis import __version__ as APP_VERSION
 from erp_analysis.mobile_config import get_mobile_config_cached
-from erp_analysis.permissions.access_profile import get_lines, get_registry_map
-from erp_analysis.permissions.access_profile import _get_user_profile_name
+from erp_analysis.access_context import _allowed_module_keys_for_access, get_effective_company
 from erp_analysis.security import require_authenticated_user
 from erp_analysis.services.mobile_profile import (
 	get_profile_branding,
@@ -20,37 +19,6 @@ from erp_analysis.services.mobile_profile import (
 )
 
 BOOTSTRAP_SCHEMA_VERSION = 1
-
-# Map logical module keys to API object_key substrings (Access Object Registry).
-MODULE_API_HINTS: dict[str, tuple[str, ...]] = {
-	"sales": (
-		"erp_analysis.sales_kpis.",
-		"erp_analysis.sales_performance.",
-		"erp_analysis.sales.",
-		"erp_analysis.dashboard.get_complete_dashboard_data",
-		"erp_analysis.dashboard.get_sales",
-		"erp_analysis.sales_kpis.get_sales_dashboard",
-	),
-	"executive": ("erp_analysis.executive.", "erp_analysis.dashboard.get_executive_dashboard"),
-	"collection": ("erp_analysis.collection.",),
-	"sales_performance": ("erp_analysis.sales_performance.", "erp_analysis.sales.get_salesperson"),
-	"sales_orders": ("erp_analysis.sales_orders.",),
-	"receivables": ("erp_analysis.receivables.",),
-	"inventory": ("erp_analysis.inventory.", "erp_analysis.stock.", "printechs_utility.inventory."),
-	"payables": ("erp_analysis.payables.",),
-	"purchase": ("erp_analysis.purchase.",),
-	"customer_360": ("erp_analysis.customer_360.", "erp_analysis.customer."),
-	"profitability": ("erp_analysis.profitability.",),
-	"exceptions": ("erp_analysis.exceptions.",),
-	"approval_analytics": (
-		"erp_analysis.approval_analytics.",
-		"erp_analysis.approvals.get_approval_analytics",
-	),
-	"approvals": ("erp_analysis.approvals.",),
-	"catalogue": ("erp_analysis.catalogue.",),
-	"push": ("erp_analysis.api.store_push_token",),
-	"settings": ("erp_analysis.profile.", "erp_analysis.api.get_my_access"),
-}
 
 DIMENSION_LABELS: dict[str, str] = {
 	"company": "Company",
@@ -74,7 +42,7 @@ def build_mobile_bootstrap(
 	from erp_analysis.api import _get_my_access
 
 	access = _get_my_access(user=user, company=company)
-	company = _resolve_effective_company(user, company, access)
+	company = get_effective_company(user=user, requested=company, access=access)
 	profile_name = resolve_mobile_app_profile_name(user=user, company=company)
 	legacy_config = get_mobile_config_cached()
 
@@ -119,25 +87,6 @@ def _build_user_block(user: str) -> dict[str, Any]:
 		"full_name": user_doc.get("full_name") or user,
 		"image_url": get_url(user_doc.user_image) if user_doc.get("user_image") else None,
 	}
-
-
-def _resolve_effective_company(
-	user: str,
-	requested: Optional[str],
-	access: dict[str, Any],
-) -> Optional[str]:
-	scope = access.get("scope") or {}
-	profile_company = scope.get("company")
-	if profile_company:
-		if requested and requested != profile_company:
-			frappe.throw(
-				frappe._("Company {0} is outside your access scope").format(requested),
-				frappe.PermissionError,
-			)
-		return profile_company
-	if requested:
-		return requested
-	return frappe.defaults.get_user_default("Company")
 
 
 def _build_context(
@@ -283,35 +232,3 @@ def _build_dashboard(profile_name: Optional[str], legacy_config: dict[str, Any])
 			)
 	return out
 
-
-def _allowed_module_keys_for_access(user: str, company: Optional[str]) -> Optional[set[str]]:
-	"""None => no Access Profile module filter (legacy wide access)."""
-	profile_name = _get_user_profile_name(user, company)
-	if not profile_name:
-		return None
-
-	registry = get_registry_map()
-	lines = get_lines(profile_name)
-	allowed_api_keys: set[str] = set()
-	for line in lines:
-		if not line.get("can_view"):
-			continue
-		access_object = line.get("access_object")
-		reg = registry.get(access_object)
-		if reg and reg.get("object_key"):
-			allowed_api_keys.add(reg["object_key"])
-
-	if not allowed_api_keys:
-		return set()
-
-	allowed_modules: set[str] = set()
-	for module_key, hints in MODULE_API_HINTS.items():
-		for api_key in allowed_api_keys:
-			if any(api_key.startswith(h) or api_key == h for h in hints):
-				allowed_modules.add(module_key)
-				break
-
-	# Shell modules (no analytics API gate).
-	for shell in ("push", "settings"):
-		allowed_modules.add(shell)
-	return allowed_modules

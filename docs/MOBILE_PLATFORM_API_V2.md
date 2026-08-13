@@ -101,6 +101,28 @@ No profile ID or customer ID is accepted. Optional:
 
 ---
 
+# Access guards (Phase G)
+
+Central helpers live in `erp_analysis.access_context`:
+
+| Helper | Purpose |
+|--------|---------|
+| `guard_mobile_api()` | Auth + company + optional module/object + view territory scope |
+| `get_effective_company()` | Access Profile company wins; rejects cross-company requests |
+| `get_effective_view_territories()` | View territory list for analytics |
+| `get_effective_approve_territories()` | Approve territory list for inbox/actions |
+| `resolve_view_territory_scope()` | Final SQL filter list (honors overrides + requested territory) |
+| `resolve_stock_warehouse_scope()` | Warehouse filter derived from profile territories |
+| `require_module_access()` | Mobile App Profile module + Access Profile module gate |
+| `require_object_access()` | Access Profile line gate by registry `object_key` |
+| `assert_customer_in_view_scope()` | Customer 360 read guard |
+
+Phase 3 APIs wired to these guards include: `sales_performance`, `profitability`, `collection`, `customer_360`, and generic `analytics`.
+
+Territory filters cannot be bypassed by passing arbitrary SQL — only logical keys and validated territory names within the user's scope are accepted.
+
+---
+
 # Generic Analytics (Phase D)
 
 All endpoints require authentication. The client sends **logical dimension keys only** — never field names or DocTypes.

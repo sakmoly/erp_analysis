@@ -6,6 +6,7 @@ from typing import Optional
 
 import frappe
 
+from erp_analysis.access_context import guard_mobile_api
 from erp_analysis.services import sales_performance as sales_performance_service
 from erp_analysis.utils.rpc import get_arg as _get_arg, get_date_arg as _get_date_arg, to_int as _to_int
 
@@ -23,7 +24,9 @@ def get_salesperson_ranking(
 
 	Uses SalesDashBoard.Sales_Person when available; falls back to Sales Team / invoice owner.
 	"""
-	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	ctx = guard_mobile_api(company=company, module_key="sales_performance", scope_module="sales")
+	company = ctx["company"]
+	territories = ctx["view_territory_scope"]
 	period = _get_arg("period", period)
 	from_date = _get_date_arg("from_date", "fromDate", default=from_date)
 	to_date = _get_date_arg("to_date", "toDate", default=to_date)
@@ -36,6 +39,7 @@ def get_salesperson_ranking(
 			from_date=from_date,
 			to_date=to_date,
 			limit=limit,
+			territories=territories,
 		)
 	except Exception:
 		frappe.log_error(title="sales_performance.get_salesperson_ranking", message=frappe.get_traceback())
@@ -56,7 +60,9 @@ def get_product_ranking(
 
 	Uses SalesDashBoard when available; falls back to Sales Invoice Item lines.
 	"""
-	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	ctx = guard_mobile_api(company=company, module_key="sales_performance", scope_module="sales")
+	company = ctx["company"]
+	territories = ctx["view_territory_scope"]
 	group_by = _get_arg("group_by", group_by) or "brand"
 	period = _get_arg("period", period)
 	from_date = _get_arg("from_date", from_date)
@@ -71,6 +77,7 @@ def get_product_ranking(
 			from_date=from_date,
 			to_date=to_date,
 			limit=limit,
+			territories=territories,
 		)
 	except Exception:
 		frappe.log_error(title="sales_performance.get_product_ranking", message=frappe.get_traceback())
@@ -132,7 +139,9 @@ def get_salesperson_invoices(
 	**kwargs,
 ):
 	"""Invoice list for salesperson drill-down (mobile-safe)."""
-	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	ctx = guard_mobile_api(company=company, module_key="sales_performance", scope_module="sales")
+	company = ctx["company"]
+	territories = ctx["view_territory_scope"]
 	salesperson = _get_arg("salesperson", salesperson) or kwargs.get("sales_person")
 	from_date = _get_date_arg("from_date", "fromDate", default=from_date)
 	to_date = _get_date_arg("to_date", "toDate", default=to_date)
@@ -147,6 +156,7 @@ def get_salesperson_invoices(
 			to_date=to_date,
 			limit=limit,
 			offset=offset,
+			territories=territories,
 		)
 	except Exception:
 		frappe.log_error(title="sales_performance.get_salesperson_invoices", message=frappe.get_traceback())
