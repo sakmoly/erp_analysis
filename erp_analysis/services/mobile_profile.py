@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 import frappe
@@ -10,6 +11,20 @@ from erp_analysis.permissions.access_profile import _get_user_profile_name
 from erp_analysis.services.mobile_dimensions import dimension_public_metadata, get_profile_dimensions
 
 PROFILE_DOCTYPE = "Mobile App Profile"
+
+
+def _parse_config_json(raw: Any) -> dict[str, Any]:
+	if not raw:
+		return {}
+	if isinstance(raw, dict):
+		return raw
+	if isinstance(raw, str):
+		try:
+			parsed = json.loads(raw)
+			return parsed if isinstance(parsed, dict) else {}
+		except Exception:
+			return {}
+	return {}
 
 
 def resolve_mobile_app_profile_name(
@@ -128,6 +143,8 @@ def get_profile_widgets(profile_name: str, *, enabled_only: bool = True) -> list
 				"secondary_dimension_key": row.secondary_dimension_key,
 				"size": row.size or "md",
 				"sort_order": row.sort_order or 0,
+				"config_json": row.config_json,
+				"config": _parse_config_json(row.config_json),
 			}
 		)
 	rows.sort(key=lambda r: (r.get("sort_order") or 0, r.get("label") or ""))

@@ -91,6 +91,7 @@ def get_sales_analysis(
 			"metric_label": METRIC_LABELS.get(metric, metric),
 			"company": company,
 			"count": len(rows),
+			"filters": parsed_filters,
 		},
 	}
 

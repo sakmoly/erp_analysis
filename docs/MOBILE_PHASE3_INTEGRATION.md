@@ -215,6 +215,254 @@ bench --site <site> execute erp_analysis.scripts.load_printechs_b2b_profile.ensu
 
 ---
 
+## 10. Chart drill-down (mobile v2)
+
+### Desk setup (one-time)
+
+On **Mobile App Profile → Dashboard Widgets**, add or edit a chart widget:
+
+| Field | Example |
+|-------|---------|
+| Widget Key | `sales_by_brand` |
+| Widget Type | `PIE` |
+| Module Key | `sales` |
+| Metric Key | `net_sales` |
+| Dimension Key | `brand` |
+| Config JSON | see below |
+
+```json
+{
+  "drill_path": ["brand", "territory", "salesperson"]
+}
+```
+
+Ensure `brand`, `territory`, and `salesperson` are enabled under **Dimensions** on the same profile.
+
+### Files to add/change in the BA mobile repo
+
+Typical Ionic/React structure — adjust paths to match your project:
+
+| File | Action |
+|------|--------|
+| `src/services/erpAnalysisApi.ts` | Add `getDashboardWidgetData()` |
+| `src/types/mobileBootstrap.ts` | Add widget + drill types |
+| `src/components/charts/DrillableChartCard.tsx` | New — pie/bar + tap handler |
+| `src/pages/HomeDashboard.tsx` | Load widgets from bootstrap; open drill sheet on tap |
+
+### TypeScript types
+
+```typescript
+// src/types/mobileBootstrap.ts
+
+export type DrillFilters = Record<string, string[]>;
+
+export interface DashboardWidgetConfig {
+  drill_path?: string[];
+  drill_chart_type?: string;
+}
+
+export interface DashboardWidget {
+  key: string;
+  label: string;
+  widget_type: string;
+  metric_key?: string;
+  dimension_key?: string;
+  module_key?: string;
+  config?: DashboardWidgetConfig;
+  config_json?: string;
+}
+
+export interface ChartSeriesPoint {
+  label: string;
+  value: number;
+  dimension_value?: string;
+}
+
+export interface WidgetChartResponse {
+  widget_key: string;
+  widget_type: string;
+  label: string;
+  chart: {
+    series: ChartSeriesPoint[];
+    metric: string;
+    dimension: string;
+    filters: DrillFilters;
+  };
+  meta: {
+    drill_path?: string[] | null;
+    drill_depth?: number | null;
+    next_dimension?: string | null;
+    drillable?: boolean;
+    render_hint?: string;
+  };
+}
+
+export interface DrillStackEntry {
+  dimension: string;
+  label: string;
+  value: string;
+}
+```
+
+### API helper
+
+```typescript
+// src/services/erpAnalysisApi.ts
+
+import type { DrillFilters, WidgetChartResponse } from '../types/mobileBootstrap';
+
+const BASE = '/api/method';
+
+export async function getDashboardWidgetData(params: {
+  widget_key: string;
+  company?: string;
+  from_date?: string;
+  to_date?: string;
+  limit?: number;
+  dimension?: string;
+  filters?: DrillFilters;
+  drill_depth?: number;
+}): Promise<WidgetChartResponse> {
+  const res = await fetch(`${BASE}/erp_analysis.api.get_dashboard_widget_data`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...params,
+      filters: params.filters ? JSON.stringify(params.filters) : undefined,
+    }),
+  });
+  const json = await res.json();
+  if (json.exc) throw new Error(json.exc);
+  return json.message as WidgetChartResponse;
+}
+```
+
+If your app uses query params + OAuth instead of POST JSON, equivalent GET:
+
+```
+/api/method/erp_analysis.api.get_dashboard_widget_data
+  ?widget_key=sales_by_brand
+  &dimension=territory
+  &filters={"brand":["NIKE"]}
+```
+
+### Drill state + slice tap handler
+
+```typescript
+// src/components/charts/DrillableChartCard.tsx (core logic)
+
+import { useState } from 'react';
+import type {
+  DashboardWidget,
+  DrillFilters,
+  DrillStackEntry,
+  WidgetChartResponse,
+} from '../types/mobileBootstrap';
+import { getDashboardWidgetData } from '../services/erpAnalysisApi';
+
+export function useWidgetDrill(widget: DashboardWidget) {
+  const [stack, setStack] = useState<DrillStackEntry[]>([]);
+  const [filters, setFilters] = useState<DrillFilters>({});
+  const [data, setData] = useState<WidgetChartResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const drillPath = widget.config?.drill_path ?? [];
+  const currentDimension =
+    stack.length > 0
+      ? widget.config?.drill_path?.[stack.length] ?? data?.chart.dimension
+      : widget.dimension_key;
+
+  async function load(levelFilters: DrillFilters = filters, dimension?: string) {
+    setLoading(true);
+    try {
+      const payload = await getDashboardWidgetData({
+        widget_key: widget.key,
+        dimension,
+        drill_depth: dimension ? undefined : stack.length || undefined,
+        filters: levelFilters,
+        limit: 10,
+      });
+      setData(payload);
+      setFilters(levelFilters);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onSliceTap(point: { label: string; dimension_value?: string }) {
+    const value = point.dimension_value ?? point.label;
+    const activeDim = data?.chart.dimension ?? widget.dimension_key;
+    if (!activeDim || !data?.meta.drillable || !data.meta.next_dimension) return;
+
+    const nextFilters: DrillFilters = {
+      ...filters,
+      [activeDim]: [value],
+    };
+    const nextDim = data.meta.next_dimension;
+
+    setStack((s) => [...s, { dimension: activeDim, label: point.label, value }]);
+    await load(nextFilters, nextDim);
+  }
+
+  async function goBack() {
+    if (stack.length === 0) {
+      setFilters({});
+      await load({}, widget.dimension_key);
+      return;
+    }
+    const newStack = stack.slice(0, -1);
+    const newFilters: DrillFilters = {};
+    for (const entry of newStack) {
+      newFilters[entry.dimension] = [entry.value];
+    }
+    const depth = newStack.length;
+    const nextDimension = drillPath[depth] ?? widget.dimension_key;
+    setStack(newStack);
+    await load(newFilters, nextDimension);
+  }
+
+  return { data, loading, stack, load, onSliceTap, goBack };
+}
+```
+
+### Home screen wiring
+
+```typescript
+// src/pages/HomeDashboard.tsx (sketch)
+
+// 1. After login: bootstrap = await getMobileBootstrap()
+// 2. For each widget in bootstrap.dashboard:
+//    - LIST → getDashboardWidgetData({ widget_key }) once, render list
+//    - PIE/BAR → render <DrillableChartCard widget={w} /> which calls load() on mount
+
+useEffect(() => {
+  load({}, widget.dimension_key); // initial chart
+}, [widget.key]);
+```
+
+### UX checklist
+
+1. Show breadcrumb from `stack` (e.g. `Brand > NIKE > Territory`).
+2. Back button calls `goBack()` — pops one level and refetches.
+3. Disable tap when `meta.drillable === false` (leaf level).
+4. On 403, show “Outside your territory scope” (filter rejected by server).
+5. Keep v1 fallback: if bootstrap has no profile, use existing hard-coded cards.
+
+### Verify from bench
+
+```bash
+# Level 0 — all brands
+bench --site site1.local execute erp_analysis.api.get_dashboard_widget_data \
+  --kwargs "{'widget_key': 'sales_by_brand', 'limit': 5}"
+
+# Level 1 — territories for one brand
+bench --site site1.local execute erp_analysis.api.get_dashboard_widget_data \
+  --kwargs "{'widget_key': 'sales_by_brand', 'dimension': 'territory', 'filters': '{\"brand\": [\"NIKE\"]}'}"
+```
+
+---
+
 ## Related
 
 - [MOBILE_PLATFORM_API_V2.md](./MOBILE_PLATFORM_API_V2.md) — v2 bootstrap + dynamic dashboard widget data

@@ -1,4 +1,5 @@
 import frappe
+from typing import Any
 
 from erp_analysis import __version__ as APP_VERSION
 
@@ -67,6 +68,9 @@ def get_dashboard_widget_data(
 	from_date: str | None = None,
 	to_date: str | None = None,
 	limit: int | None = None,
+	dimension: str | None = None,
+	filters: Any = None,
+	drill_depth: int | None = None,
 	**kwargs,
 ):
 	"""Return chart/list data for one profile dashboard widget (v2 dynamic home)."""
@@ -74,12 +78,16 @@ def get_dashboard_widget_data(
 	from erp_analysis.utils.rpc import clean_kwargs, get_arg, to_int
 
 	clean_kwargs(kwargs)
+	drill = get_arg("drill_depth", drill_depth)
 	return _impl(
 		widget_key=get_arg("widget_key", widget_key),
 		company=get_arg("company", company),
 		from_date=get_arg("from_date", from_date),
 		to_date=get_arg("to_date", to_date),
 		limit=to_int(get_arg("limit", limit), 10),
+		dimension=get_arg("dimension", dimension),
+		filters=get_arg("filters", filters),
+		drill_depth=to_int(drill, None) if drill is not None and str(drill).strip() != "" else None,
 		**kwargs,
 	)
 

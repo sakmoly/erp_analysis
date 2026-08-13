@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 import frappe
@@ -48,6 +49,74 @@ WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 
+def parse_widget_config_json(raw: Any) -> dict[str, Any]:
+	if not raw:
+		return {}
+	if isinstance(raw, dict):
+		return raw
+	if isinstance(raw, str):
+		try:
+			parsed = json.loads(raw)
+			return parsed if isinstance(parsed, dict) else {}
+		except Exception:
+			return {}
+	return {}
+
+
+def resolve_chart_dimension(
+	widget: dict[str, Any],
+	*,
+	dimension_override: Optional[str] = None,
+	drill_depth: Optional[int] = None,
+) -> tuple[str, dict[str, Any], Optional[int]]:
+	"""Pick group-by dimension from override, drill_path index, or widget default."""
+	config = widget.get("config") or {}
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+
+	if dimension_override:
+		dim = dimension_override.strip().lower()
+		return dim, config, _depth_for_dimension(dim, drill_path)
+
+	if drill_depth is not None and drill_path:
+		idx = int(drill_depth)
+		if idx < 0 or idx >= len(drill_path):
+			frappe.throw(_("drill_depth {0} is out of range for drill_path").format(idx), frappe.ValidationError)
+		return drill_path[idx], config, idx
+
+	default_dim = (widget.get("dimension_key") or "territory").strip().lower()
+	return default_dim, config, _depth_for_dimension(default_dim, drill_path)
+
+
+def next_drill_dimension(current_dimension: str, config: dict[str, Any]) -> Optional[str]:
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+	if not drill_path:
+		return None
+	idx = _depth_for_dimension(current_dimension, drill_path)
+	if idx is None or idx + 1 >= len(drill_path):
+		return None
+	return drill_path[idx + 1]
+
+
+def _normalize_drill_path(raw: Any) -> list[str]:
+	if not raw:
+		return []
+	if isinstance(raw, str):
+		raw = [raw]
+	if not isinstance(raw, (list, tuple)):
+		return []
+	return [str(item).strip().lower() for item in raw if str(item).strip()]
+
+
+def _depth_for_dimension(dimension: str, drill_path: list[str]) -> Optional[int]:
+	dim = (dimension or "").strip().lower()
+	if not drill_path:
+		return None
+	try:
+		return drill_path.index(dim)
+	except ValueError:
+		return None
+
+
 def resolve_widget_definition(
 	user: str,
 	widget_key: str,
@@ -73,6 +142,8 @@ def resolve_widget_definition(
 	if not row and not defaults:
 		frappe.throw(_("Unknown dashboard widget: {0}").format(key), frappe.ValidationError)
 
+	config = parse_widget_config_json(row.get("config_json"))
+
 	merged = {
 		"key": key,
 		"label": row.get("label") or defaults.get("label") or key.replace("_", " ").title(),
@@ -83,6 +154,7 @@ def resolve_widget_definition(
 		"secondary_dimension_key": row.get("secondary_dimension_key") or defaults.get("secondary_dimension_key"),
 		"legacy_method": defaults.get("legacy_method"),
 		"size": row.get("size") or "md",
+		"config": config,
 	}
 	return merged
 
@@ -94,6 +166,9 @@ def get_dashboard_widget_data(
 	from_date: Optional[str] = None,
 	to_date: Optional[str] = None,
 	limit: int = 10,
+	dimension: Optional[str] = None,
+	filters: Any = None,
+	drill_depth: Optional[int] = None,
 	**kwargs,
 ) -> dict[str, Any]:
 	"""Return chart series or legacy payload for one bootstrap dashboard widget."""
@@ -101,6 +176,12 @@ def get_dashboard_widget_data(
 	company = company or kwargs.get("company")
 	widget_key = widget_key or kwargs.get("widget_key")
 	limit = int(kwargs.get("limit") or limit or 10)
+	dimension = dimension or kwargs.get("dimension")
+	filters = filters if filters is not None else kwargs.get("filters")
+	if drill_depth is None and kwargs.get("drill_depth") is not None:
+		drill_depth = kwargs.get("drill_depth")
+	if drill_depth is not None:
+		drill_depth = int(drill_depth)
 
 	widget = resolve_widget_definition(user, widget_key, company=company)
 	module_key = widget.get("module_key")
@@ -113,7 +194,17 @@ def get_dashboard_widget_data(
 	widget_type = widget["widget_type"]
 
 	if widget_type in CHART_WIDGET_TYPES:
-		return _chart_widget_payload(user, company, widget, from_date, to_date, limit)
+		return _chart_widget_payload(
+			user,
+			company,
+			widget,
+			from_date,
+			to_date,
+			limit,
+			dimension_override=dimension,
+			filters=filters,
+			drill_depth=drill_depth,
+		)
 
 	if widget_type == "MATRIX":
 		frappe.throw(
@@ -131,9 +222,19 @@ def _chart_widget_payload(
 	from_date: Optional[str],
 	to_date: Optional[str],
 	limit: int,
+	*,
+	dimension_override: Optional[str] = None,
+	filters: Any = None,
+	drill_depth: Optional[int] = None,
 ) -> dict[str, Any]:
 	metric = widget.get("metric_key") or "net_sales"
-	dimension = widget.get("dimension_key") or "territory"
+	dimension, config, resolved_depth = resolve_chart_dimension(
+		widget,
+		dimension_override=dimension_override,
+		drill_depth=drill_depth,
+	)
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+	next_dim = next_drill_dimension(dimension, config)
 
 	from erp_analysis.services.analytics_sales import get_sales_analysis
 
@@ -144,6 +245,7 @@ def _chart_widget_payload(
 		to_date=to_date,
 		dimension=dimension,
 		metric=metric,
+		filters=filters,
 		limit=limit,
 	)
 
@@ -151,9 +253,12 @@ def _chart_widget_payload(
 		{
 			"label": row.get("label") or row.get("dimension_value"),
 			"value": row.get("metric_value"),
+			"dimension_value": row.get("dimension_value"),
 		}
 		for row in analysis.get("data") or []
 	]
+
+	applied_filters = (analysis.get("meta") or {}).get("filters") or {}
 
 	return {
 		"widget_key": widget["key"],
@@ -163,11 +268,16 @@ def _chart_widget_payload(
 			"series": series,
 			"metric": metric,
 			"dimension": dimension,
+			"filters": applied_filters,
 		},
 		"meta": {
 			"schema_version": 1,
 			**(analysis.get("meta") or {}),
 			"render_hint": widget["widget_type"].lower(),
+			"drill_path": drill_path or None,
+			"drill_depth": resolved_depth,
+			"next_dimension": next_dim,
+			"drillable": bool(next_dim),
 		},
 	}
 

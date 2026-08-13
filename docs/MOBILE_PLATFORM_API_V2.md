@@ -175,8 +175,22 @@ Each profile widget is loaded dynamically via **`get_dashboard_widget_data`** (s
 | `from_date` | No | ISO date; chart widgets only |
 | `to_date` | No | ISO date; chart widgets only |
 | `limit` | No | Max rows (default `10`) |
+| `dimension` | No | Override group-by logical key (drill-down) |
+| `filters` | No | JSON object `{ "brand": ["NIKE"], "territory": ["Jeddah"] }` |
+| `drill_depth` | No | Index into widget `config.drill_path` (alternative to `dimension`) |
 
 The server resolves widget metadata from the user's Mobile App Profile (metric, dimension, `widget_type`) merged with code defaults in `WIDGET_DEFAULTS`.
+
+Optional **Config JSON** on the widget row (Desk):
+
+```json
+{
+  "drill_path": ["brand", "territory", "salesperson"],
+  "drill_chart_type": "BAR"
+}
+```
+
+Bootstrap returns parsed `config` on each `dashboard[]` item. `drill_chart_type` is a mobile hint only (server does not enforce chart type per depth yet).
 
 ### Response shapes
 
@@ -189,18 +203,45 @@ The server resolves widget metadata from the user's Mobile App Profile (metric, 
   "label": "Sales Performance",
   "chart": {
     "series": [
-      {"label": "Riyadh", "value": 250000.0},
-      {"label": "Jeddah", "value": 125000.5}
+      {"label": "Riyadh", "value": 250000.0, "dimension_value": "Riyadh"},
+      {"label": "Jeddah", "value": 125000.5, "dimension_value": "Jeddah"}
     ],
     "metric": "net_sales",
-    "dimension": "territory"
+    "dimension": "territory",
+    "filters": {"brand": ["NIKE"]}
   },
   "meta": {
     "schema_version": 1,
-    "render_hint": "pie"
+    "render_hint": "pie",
+    "drill_path": ["brand", "territory", "salesperson"],
+    "drill_depth": 1,
+    "next_dimension": "salesperson",
+    "drillable": true
   }
 }
 ```
+
+**Drill-down request** (user tapped brand slice `NIKE`, show territories):
+
+```
+GET /api/method/erp_analysis.api.get_dashboard_widget_data
+  ?widget_key=sales_by_brand
+  &dimension=territory
+  &filters={"brand":["NIKE"]}
+  &limit=10
+```
+
+Or use `drill_depth=1` when `config.drill_path` is set on the widget (same example if path is `["brand","territory",...]`).
+
+Response `meta` fields for drill UX:
+
+| Field | Meaning |
+|-------|---------|
+| `drill_path` | Ordered dimensions from profile `config_json` |
+| `drill_depth` | Current index in `drill_path`, if known |
+| `next_dimension` | Suggested group-by for the next tap |
+| `drillable` | `true` when another drill level exists |
+| `chart.filters` | Filters applied to this query |
 
 **Legacy list/KPI widgets** (`LIST`, `KPI`, `TABLE`):
 
@@ -231,6 +272,10 @@ The server resolves widget metadata from the user's Mobile App Profile (metric, 
    - `LIST` / `KPI` / `TABLE` → `data` (legacy layout)
 
 Legacy v1 continues to use `get_mobile_config` + per-widget hard-coded APIs until the app migrates.
+
+### Chart drill-down (mobile)
+
+See [§10 Chart drill-down](./MOBILE_PHASE3_INTEGRATION.md#10-chart-drill-down-mobile-v2) in the Phase 3 integration guide for copy-paste mobile service code.
 
 ---
 
