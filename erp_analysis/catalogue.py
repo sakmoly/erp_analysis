@@ -384,9 +384,12 @@ def get_catalogue_detail(
 # =======================================================
 
 
-@frappe.whitelist(methods=["GET"], allow_guest=True)
+@frappe.whitelist(methods=["GET"])
 def get_catalogue_flip_url(catalogue_id: str) -> Dict[str, Any]:
-    """Get the flip URL for a catalogue. Returns JSON error if catalogue not found."""
+    """Get the flip URL for a catalogue. Requires authentication."""
+    from erp_analysis.security import require_authenticated_user
+
+    require_authenticated_user()
     try:
         # Ensure JSON response - wrap in try to handle cases where frappe.local might not be initialized
         try:
@@ -425,6 +428,12 @@ def get_catalogue_flip_url(catalogue_id: str) -> Dict[str, Any]:
             frappe.log_error(frappe.get_traceback(), "get_catalogue_flip_url error")
             return {
                 "error": f"Error fetching catalogue: {str(e)}",
+                "catalogue_id": catalogue_id,
+            }
+
+        if not doc.get("enabled"):
+            return {
+                "error": "Catalogue is not available",
                 "catalogue_id": catalogue_id,
             }
 

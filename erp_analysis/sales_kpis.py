@@ -232,7 +232,6 @@ def _pct_change(curr: float, prev: float) -> Tuple[float, str]:
 # ------------------------
 # API
 # ------------------------
-@frappe.whitelist(allow_guest=True)
 @frappe.whitelist()
 @frappe.read_only()
 def get_dashboard_kpis(
@@ -244,7 +243,9 @@ def get_dashboard_kpis(
     currency: str = "SAR",
 ) -> Dict[str, Any]:
     from erp_analysis.permissions.access_profile import resolve_territory_scope
+    from erp_analysis.security import require_authenticated_user
 
+    require_authenticated_user()
     today = _parse_date(date)
 
     # Resolve the date column ONCE (handles Invoice Date / invoice_date / Posting Date, etc.)
@@ -353,7 +354,7 @@ def get_dashboard_kpis(
 # Main API
 # -----------------------
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def get_today_sales_kpis(filters=None):
     """
     Returns JSON:
@@ -375,6 +376,10 @@ def get_today_sales_kpis(filters=None):
       }
     }
     """
+    from erp_analysis.security import require_authenticated_user
+
+    require_authenticated_user()
+
     # Parse filters safely
     if isinstance(filters, str):
         try:

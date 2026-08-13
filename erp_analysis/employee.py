@@ -82,7 +82,7 @@ def get_employee_profile(email: str | None = None):
 			"country": country,
 		}
 	}
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 @frappe.read_only()
 def get_employees(
     employee: str | None = None,
@@ -121,6 +121,10 @@ def get_employees(
         "pagination": {"limit_start": 0, "limit_page_length": 50, "returned": 12}
       }
     """
+    from erp_analysis.security import require_authenticated_user
+
+    require_authenticated_user()
+
     # Build filters safely
     filters = {}
     if employee:
