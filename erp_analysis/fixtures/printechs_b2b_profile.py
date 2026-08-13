@@ -7,6 +7,7 @@ from typing import Any, Optional
 import frappe
 
 from erp_analysis.mobile_config import default_modules
+from erp_analysis.mobile_module_icons import DEFAULT_MODULE_ICON_KEYS
 from erp_analysis.services.analytics_dimensions import _legacy_dimension_specs
 from erp_analysis.services.mobile_dimensions import validate_dimension_definition
 from erp_analysis.utils.schema import has_field
@@ -45,6 +46,7 @@ def _module_rows() -> list[dict[str, Any]]:
 				"enabled": 1,
 				"sort_order": idx,
 				"route_key": key,
+				"icon_key": DEFAULT_MODULE_ICON_KEYS.get(key),
 			}
 		)
 	return rows

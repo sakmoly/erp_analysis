@@ -10,3 +10,8 @@ def ensure_profile(company: Optional[str] = None, update_existing: bool = False)
 	from erp_analysis.fixtures.printechs_b2b_profile import ensure_profile as _ensure
 
 	return _ensure(company=company, update_existing=bool(update_existing))
+
+
+def refresh_icons():
+	"""Update module icon_key rows on existing PRINTECHS-B2B profile."""
+	return ensure_profile(update_existing=True)

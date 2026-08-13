@@ -9,6 +9,7 @@ from frappe.utils import get_url
 
 from erp_analysis import __version__ as APP_VERSION
 from erp_analysis.mobile_config import get_mobile_config_cached
+from erp_analysis.mobile_module_icons import get_module_icon_key
 from erp_analysis.access_context import _allowed_module_keys_for_access, get_effective_company
 from erp_analysis.security import require_authenticated_user
 from erp_analysis.services.mobile_profile import (
@@ -155,7 +156,7 @@ def _build_modules(
 				"label": key.replace("_", " ").title(),
 				"enabled": bool(config_modules.get(key, True)),
 				"route_key": key,
-				"icon_key": None,
+				"icon_key": get_module_icon_key(key),
 				"feature_key": None,
 				"sort_order": idx,
 			}
@@ -178,7 +179,7 @@ def _build_modules(
 				"label": row.get("label") or key,
 				"enabled": bool(row.get("enabled", True)),
 				"route_key": row.get("route_key") or key,
-				"icon_key": row.get("icon_key"),
+				"icon_key": get_module_icon_key(key, row.get("icon_key")),
 				"feature_key": row.get("feature_key"),
 			}
 		)
