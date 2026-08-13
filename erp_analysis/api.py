@@ -51,6 +51,16 @@ def get_mobile_config(**kwargs):
 
 
 @frappe.whitelist()
+def get_mobile_bootstrap(company: str | None = None, **kwargs):
+	"""Authenticated mobile bootstrap — profile, modules, dimensions, permissions."""
+	from erp_analysis.utils.rpc import clean_kwargs
+	from erp_analysis.services.mobile_bootstrap import build_mobile_bootstrap
+
+	clean_kwargs(kwargs)
+	return build_mobile_bootstrap(company=company)
+
+
+@frappe.whitelist()
 def get_my_access(user: str | None = None, company: str | None = None, **kwargs):
 	from erp_analysis.utils.rpc import clean_kwargs
 
