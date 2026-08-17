@@ -44,6 +44,11 @@ class MobileAppProfile(Document):
 			if key in seen_modules:
 				frappe.throw(_("Duplicate module key: {0}").format(key))
 			seen_modules.add(key)
+			screen_type = (_val(row, "screen_type") or "module").strip().lower()
+			if screen_type == "dashboard":
+				board_id = (_val(row, "dashboard_id") or _val(row, "module_key") or "").strip().lower()
+				if not board_id:
+					frappe.throw(_("Dashboard ID is required when Screen Type is dashboard (module {0})").format(key))
 
 		seen_dimensions: set[str] = set()
 		for row in self.dimensions or []:
@@ -81,5 +86,19 @@ class MobileAppProfile(Document):
 				frappe.throw(
 					_("Widget {0} references unknown dashboard_id: {1}").format(
 						_val(row, "widget_key"), _val(row, "dashboard_id")
+					)
+				)
+
+		for row in self.modules or []:
+			screen_type = (_val(row, "screen_type") or "module").strip().lower()
+			if screen_type != "dashboard":
+				continue
+			if not _val(row, "enabled"):
+				continue
+			board_id = (_val(row, "dashboard_id") or _val(row, "module_key") or "").strip().lower()
+			if seen_dashboards and board_id and board_id not in seen_dashboards:
+				frappe.throw(
+					_("Module {0} references unknown dashboard board: {1}").format(
+						_val(row, "module_key"), board_id
 					)
 				)

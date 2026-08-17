@@ -180,7 +180,14 @@ def _build_modules(
 		if not config_modules.get(key, True):
 			continue
 		if allowed_by_access is not None and key not in allowed_by_access:
-			continue
+			screen_type = (row.get("screen_type") or "module").strip().lower()
+			dashboard_id = (row.get("dashboard_id") or "").strip()
+			if screen_type == "dashboard" and dashboard_id and "sales" in allowed_by_access:
+				pass
+			else:
+				continue
+		screen_type = (row.get("screen_type") or "module").strip().lower()
+		dashboard_id = (row.get("dashboard_id") or "").strip() or None
 		out.append(
 			{
 				"key": key,
@@ -188,6 +195,8 @@ def _build_modules(
 				"enabled": bool(row.get("enabled", True)),
 				"route_key": row.get("route_key") or key,
 				"icon_key": get_module_icon_key(key, row.get("icon_key")),
+				"screen_type": screen_type,
+				"dashboard_id": dashboard_id,
 				"feature_key": row.get("feature_key"),
 			}
 		)

@@ -12,6 +12,8 @@
   "sort_order",
   "icon_key",
   "route_key",
+  "screen_type",
+  "dashboard_id",
   "feature_key"
  ],
  "fields": [
@@ -51,6 +53,22 @@
    "fieldname": "route_key",
    "fieldtype": "Data",
    "label": "Route Key"
+  },
+  {
+   "default": "module",
+   "description": "module = app registry route; dashboard = widget board (/dashboard-board/…); report_list = report hub",
+   "fieldname": "screen_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Screen Type",
+   "options": "module\ndashboard\nreport_list"
+  },
+  {
+   "depends_on": "eval:doc.screen_type=='dashboard'",
+   "description": "Dashboard board key (must exist under Mobile App Profile → Dashboard Boards). Used when Screen Type is dashboard.",
+   "fieldname": "dashboard_id",
+   "fieldtype": "Data",
+   "label": "Dashboard ID"
   },
   {
    "fieldname": "feature_key",

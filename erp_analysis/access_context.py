@@ -319,4 +319,6 @@ def _allowed_module_keys_for_access(user: str, company: Optional[str]) -> Option
 
 	for shell in ("push", "settings"):
 		allowed_modules.add(shell)
+	if "sales" in allowed_modules:
+		allowed_modules.add("sales_overview")
 	return allowed_modules

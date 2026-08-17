@@ -21,6 +21,7 @@ DEFAULT_MODULE_ICON_KEYS: dict[str, str] = {
 	"profitability": "pie-chart-outline",
 	"exceptions": "alert-circle-outline",
 	"approval_analytics": "stats-chart-outline",
+	"sales_overview": "flask-outline",
 	# Future / optional module keys
 	"inventory_health": "pulse-outline",
 	"retail": "storefront-outline",

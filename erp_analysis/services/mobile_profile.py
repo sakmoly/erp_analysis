@@ -105,6 +105,8 @@ def get_profile_modules(profile_name: str, *, enabled_only: bool = True) -> list
 				"enabled": bool(row.enabled),
 				"route_key": row.route_key or key,
 				"icon_key": row.icon_key,
+				"screen_type": (getattr(row, "screen_type", None) or "module").strip().lower(),
+				"dashboard_id": (getattr(row, "dashboard_id", None) or "").strip() or None,
 				"feature_key": row.feature_key,
 				"sort_order": row.sort_order or 0,
 			}
