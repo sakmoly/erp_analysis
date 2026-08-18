@@ -94,6 +94,34 @@ def get_dashboard_widget_data(
 	)
 
 
+@frappe.whitelist(methods=["GET", "POST"])
+def get_dashboard_board_data(
+	dashboard_id: str | None = None,
+	company: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	limit: int | None = None,
+	use_cache: int | None = None,
+	refresh: int | None = None,
+	**kwargs,
+):
+	"""Return all widget payloads for one dashboard board (batch load)."""
+	from erp_analysis.services.mobile_widgets import get_dashboard_board_data as _impl
+	from erp_analysis.utils.rpc import clean_kwargs, get_arg, to_bool, to_int
+
+	clean_kwargs(kwargs)
+	return _impl(
+		dashboard_id=get_arg("dashboard_id", dashboard_id),
+		company=get_arg("company", company),
+		from_date=get_arg("from_date", from_date),
+		to_date=get_arg("to_date", to_date),
+		limit=to_int(get_arg("limit", limit), 10),
+		use_cache=to_bool(get_arg("use_cache", use_cache), True),
+		refresh=to_bool(get_arg("refresh", refresh), False),
+		**kwargs,
+	)
+
+
 @frappe.whitelist()
 def get_my_access(user: str | None = None, company: str | None = None, **kwargs):
 	from erp_analysis.utils.rpc import clean_kwargs

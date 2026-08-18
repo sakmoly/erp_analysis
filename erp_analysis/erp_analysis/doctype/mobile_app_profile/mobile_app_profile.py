@@ -12,9 +12,21 @@ class MobileAppProfile(Document):
 
 	def on_update(self):
 		clear_mobile_config_cache()
+		try:
+			from erp_analysis.services.mobile_widgets import clear_dashboard_board_cache
+
+			clear_dashboard_board_cache()
+		except Exception:
+			pass
 
 	def on_trash(self):
 		clear_mobile_config_cache()
+		try:
+			from erp_analysis.services.mobile_widgets import clear_dashboard_board_cache
+
+			clear_dashboard_board_cache()
+		except Exception:
+			pass
 
 	def _validate_unique_profile_name(self):
 		name = (self.profile_name or "").strip()

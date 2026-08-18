@@ -14,9 +14,13 @@
   "module_key",
   "dimension_key",
   "secondary_dimension_key",
+  "period",
+  "show_ly",
+  "show_currency_symbol",
   "enabled",
   "sort_order",
   "size",
+  "table_columns_json",
   "config_json"
  ],
  "fields": [
@@ -68,6 +72,30 @@
    "label": "Secondary Dimension Key"
   },
   {
+   "default": "mtd",
+   "depends_on": "eval:['PIE','DONUT','BAR','LINE','RANKING','TABLE','KPI'].includes(doc.widget_type)",
+   "description": "Date window for widget data (MTD, YTD, etc.). Also available in Config JSON as \"period\".",
+   "fieldname": "period",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Period",
+   "options": "mtd\nytd\ntoday\ncustom"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:['KPI','PIE','DONUT','BAR','LINE','RANKING','TABLE'].includes(doc.widget_type)",
+   "fieldname": "show_ly",
+   "fieldtype": "Check",
+   "label": "Show Last Year"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:['KPI','PIE','DONUT','BAR','LINE','RANKING','TABLE'].includes(doc.widget_type)",
+   "fieldname": "show_currency_symbol",
+   "fieldtype": "Check",
+   "label": "Show Currency Symbol"
+  },
+  {
    "default": "1",
    "fieldname": "enabled",
    "fieldtype": "Check",
@@ -87,6 +115,14 @@
    "fieldtype": "Select",
    "label": "Size",
    "options": "sm\nmd\nlg\nfull"
+  },
+  {
+   "depends_on": "eval:['TABLE','RANKING'].includes(doc.widget_type)",
+   "description": "JSON array of column definitions for TABLE/RANKING widgets.",
+   "fieldname": "table_columns_json",
+   "fieldtype": "Code",
+   "label": "Table Columns JSON",
+   "options": "JSON"
   },
   {
    "fieldname": "config_json",

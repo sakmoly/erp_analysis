@@ -8,9 +8,18 @@ import frappe
 from frappe.utils import get_url
 
 from erp_analysis import __version__ as APP_VERSION
+from erp_analysis.access_context import (
+	_allowed_module_keys_for_access,
+	_dashboard_module_allowed,
+	get_effective_company,
+)
 from erp_analysis.mobile_config import get_mobile_config_cached
 from erp_analysis.mobile_module_icons import get_module_icon_key
-from erp_analysis.access_context import _allowed_module_keys_for_access, get_effective_company
+from erp_analysis.fixtures.shell_module_dashboards import (
+	SHELL_MODULE_TO_DASHBOARD,
+	resolve_dashboard_board_id,
+	shell_module_dashboard,
+)
 from erp_analysis.security import require_authenticated_user
 from erp_analysis.services.mobile_profile import (
 	get_profile_branding,
@@ -18,9 +27,21 @@ from erp_analysis.services.mobile_profile import (
 	get_profile_modules,
 	get_profile_widgets,
 	resolve_mobile_app_profile_name,
+	sanitize_widget_for_bootstrap,
 )
 
 BOOTSTRAP_SCHEMA_VERSION = 1
+
+# Ops dashboard boards — embed batch widget payloads in bootstrap (mobile merge fallback).
+_BOOTSTRAP_HYDRATED_BOARDS = frozenset(
+	{
+		"home",
+		"receivables_overview",
+		"inventory_overview",
+		"collection_overview",
+		"executive_overview",
+	}
+)
 
 DIMENSION_LABELS: dict[str, str] = {
 	"company": "Company",
@@ -51,6 +72,7 @@ def build_mobile_bootstrap(
 	modules = _build_modules(user, company, profile_name, legacy_config, access)
 	dimensions = _build_dimensions(profile_name, legacy_config)
 	dashboard_boards = _build_dashboard_boards(profile_name, legacy_config)
+	dashboard_boards, board_data = _hydrate_dashboard_boards_with_data(user, company, dashboard_boards)
 	dashboard = _default_dashboard_widgets(dashboard_boards, profile_name, legacy_config)
 	branding = _build_branding(profile_name, legacy_config)
 	context = _build_context(user, company, profile_name, access)
@@ -66,6 +88,7 @@ def build_mobile_bootstrap(
 		"dimensions": dimensions,
 		"dashboards": dashboard_boards,
 		"dashboard": dashboard,
+		"board_data": board_data or None,
 		"permissions": {
 			"scope": access.get("scope") or {},
 			"objects": access.get("profiles") or [],
@@ -177,17 +200,25 @@ def _build_modules(
 		key = (row.get("key") or "").strip()
 		if not key:
 			continue
-		if not config_modules.get(key, True):
+		screen_type = (row.get("screen_type") or "module").strip().lower()
+		dashboard_id = (row.get("dashboard_id") or "").strip() or None
+		overview_dashboard = shell_module_dashboard(key)
+		if overview_dashboard and not dashboard_id:
+			screen_type = "dashboard"
+			dashboard_id = overview_dashboard
+		is_profile_dashboard = screen_type == "dashboard" and bool(dashboard_id)
+
+		# Mobile App Settings module flags only apply to legacy module keys.
+		# Profile-defined dashboard modules (sales_overview, etc.) are not gated here.
+		if key in (legacy_config.get("modules") or {}) and not config_modules.get(key, True):
 			continue
+
 		if allowed_by_access is not None and key not in allowed_by_access:
-			screen_type = (row.get("screen_type") or "module").strip().lower()
-			dashboard_id = (row.get("dashboard_id") or "").strip()
-			if screen_type == "dashboard" and dashboard_id and "sales" in allowed_by_access:
+			if _dashboard_module_allowed(key, allowed_by_access):
 				pass
 			else:
 				continue
-		screen_type = (row.get("screen_type") or "module").strip().lower()
-		dashboard_id = (row.get("dashboard_id") or "").strip() or None
+
 		out.append(
 			{
 				"key": key,
@@ -196,7 +227,7 @@ def _build_modules(
 				"route_key": row.get("route_key") or key,
 				"icon_key": get_module_icon_key(key, row.get("icon_key")),
 				"screen_type": screen_type,
-				"dashboard_id": dashboard_id,
+				"dashboard_id": dashboard_id or shell_module_dashboard(key),
 				"feature_key": row.get("feature_key"),
 			}
 		)
@@ -273,6 +304,65 @@ def _build_dashboard_boards(profile_name: Optional[str], legacy_config: dict[str
 		)
 	boards.sort(key=lambda r: (r.get("sort_order") or 0, r.get("label") or ""))
 	return boards
+
+
+def _hydrate_dashboard_boards_with_data(
+	user: str,
+	company: Optional[str],
+	boards: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+	"""Merge batch widget payloads into bootstrap boards (mobile fallback when batch merge fails)."""
+	from erp_analysis.services.mobile_widgets import get_dashboard_board_data
+
+	hydrated_boards: list[dict[str, Any]] = []
+	board_data: dict[str, Any] = {}
+
+	for board in boards:
+		board_key = (board.get("key") or "").strip()
+		if not board_key or board_key not in _BOOTSTRAP_HYDRATED_BOARDS:
+			hydrated_boards.append(board)
+			continue
+
+		widgets_by_key: dict[str, Any] = {}
+		try:
+			batch = get_dashboard_board_data(
+				user=user,
+				company=company,
+				dashboard_id=board_key,
+				use_cache=True,
+			)
+			widgets_by_key = batch.get("widgets") or {}
+			board_data[board_key] = {
+				"dashboard_id": board_key,
+				"widgets": widgets_by_key,
+				"errors": batch.get("errors"),
+			}
+		except Exception:
+			frappe.log_error(title=f"bootstrap.board_data.{board_key}", message=frappe.get_traceback())
+
+		hydrated_widgets: list[dict[str, Any]] = []
+		for meta in board.get("widgets") or []:
+			key = (meta.get("key") or "").strip()
+			payload = widgets_by_key.get(key) or {}
+			if not payload:
+				cfg = meta.get("config") or {}
+				for alias in (cfg.get("chart_key"), cfg.get("kpi_id")):
+					alias_key = (alias or "").strip()
+					if alias_key and alias_key in widgets_by_key:
+						payload = widgets_by_key[alias_key]
+						break
+			hydrated_widgets.append(
+				sanitize_widget_for_bootstrap({**meta, **payload} if payload else dict(meta))
+			)
+
+		hydrated_boards.append({**board, "widgets": hydrated_widgets})
+
+	# Allow mobile to resolve board_data by shell tab key (receivables) or board key.
+	for shell_key, overview_key in SHELL_MODULE_TO_DASHBOARD.items():
+		if overview_key in board_data and shell_key not in board_data:
+			board_data[shell_key] = board_data[overview_key]
+
+	return hydrated_boards, board_data
 
 
 def _default_dashboard_widgets(

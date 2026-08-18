@@ -12,6 +12,22 @@ from erp_analysis.services.mobile_dimensions import dimension_public_metadata, g
 
 PROFILE_DOCTYPE = "Mobile App Profile"
 
+# Server-only widget config — omit from mobile bootstrap so the app uses batch payloads.
+_BOOTSTRAP_CONFIG_SKIP = frozenset(
+	{
+		"data_source",
+		"payload_source",
+		"legacy_method",
+		"rows_key",
+		"rows_mode",
+		"label_map",
+		"value_fields",
+		"value_field",
+		"label_field",
+		"columns",
+	}
+)
+
 
 def _parse_config_json(raw: Any) -> dict[str, Any]:
 	if not raw:
@@ -134,11 +150,31 @@ def _widget_row_public(row, *, default_board: str) -> dict[str, Any]:
 		"module_key": row.module_key,
 		"dimension_key": row.dimension_key,
 		"secondary_dimension_key": row.secondary_dimension_key,
+		"period": getattr(row, "period", None) or "mtd",
+		"show_ly": bool(getattr(row, "show_ly", 0)),
+		"show_currency_symbol": bool(getattr(row, "show_currency_symbol", 1)),
+		"table_columns_json": getattr(row, "table_columns_json", None),
 		"size": row.size or "md",
 		"sort_order": row.sort_order or 0,
 		"config_json": row.config_json,
-		"config": _parse_config_json(row.config_json),
+		"config": _bootstrap_layout_config(row.config_json),
 	}
+
+
+def _bootstrap_layout_config(raw: Any) -> dict[str, Any]:
+	config = _parse_config_json(raw)
+	return {key: value for key, value in config.items() if key not in _BOOTSTRAP_CONFIG_SKIP}
+
+
+def sanitize_widget_for_bootstrap(widget: dict[str, Any]) -> dict[str, Any]:
+	"""Strip server-only config before mobile bootstrap (batch API keeps full config server-side)."""
+	out = dict(widget)
+	raw_config = out.get("config_json")
+	if raw_config:
+		safe = _bootstrap_layout_config(raw_config)
+		out["config"] = safe
+		out["config_json"] = json.dumps(safe) if safe else None
+	return out
 
 
 def get_profile_widgets(

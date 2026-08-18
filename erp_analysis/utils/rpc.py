@@ -39,6 +39,21 @@ def to_int(value, default=0) -> int:
 		return default
 
 
+def to_bool(value, default: bool = False) -> bool:
+	if value is None or value == "":
+		return default
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, (int, float)):
+		return bool(value)
+	text = str(value).strip().lower()
+	if text in ("0", "false", "no", "off"):
+		return False
+	if text in ("1", "true", "yes", "on"):
+		return True
+	return default
+
+
 def to_date(value: Optional[str]) -> date:
 	try:
 		return frappe.utils.getdate(value) if value else frappe.utils.getdate(date.today())

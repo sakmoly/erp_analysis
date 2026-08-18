@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+from datetime import datetime
 from typing import Any, Optional
 
 import frappe
 from frappe import _
 
-from erp_analysis.access_context import guard_mobile_api
-from erp_analysis.services.mobile_profile import resolve_mobile_app_profile_name
+from erp_analysis.access_context import get_effective_company, guard_mobile_api
+from erp_analysis.fixtures.shell_module_dashboards import resolve_dashboard_board_id
+from erp_analysis.services.mobile_profile import get_profile_widgets, resolve_mobile_app_profile_name
+from erp_analysis.services.widget_batch_cache import (
+	get_cached_kpi,
+	reset_batch_kpi_cache,
+	set_cached_kpi,
+	warm_batch_kpi_cache,
+)
 
-CHART_WIDGET_TYPES = frozenset({"PIE", "DONUT", "BAR", "LINE", "RANKING"})
-LEGACY_WIDGET_TYPES = frozenset({"LIST", "KPI", "TABLE", "MATRIX"})
+CHART_WIDGET_TYPES = frozenset({"PIE", "DONUT", "BAR", "LINE"})
+TABLE_WIDGET_TYPES = frozenset({"TABLE", "RANKING"})
+LEGACY_WIDGET_TYPES = frozenset({"LIST", "MATRIX"})
 NAV_WIDGET_TYPES = frozenset({"LINK"})
+
+BOARD_DATA_CACHE_TTL = 180
 
 # Defaults when Desk row omits metric/dimension/legacy API mapping.
 WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -21,7 +33,7 @@ WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
 		"module_key": "sales",
 		"metric_key": "net_sales",
 		"dimension_key": "territory",
-		"legacy_method": "erp_analysis.sales_kpis.get_dashboard_kpis",
+		"widget_type": "PIE",
 	},
 	"receivables_card": {
 		"module_key": "receivables",
@@ -47,6 +59,59 @@ WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
 		"module_key": "exceptions",
 		"legacy_method": "erp_analysis.exceptions.get_management_exceptions",
 	},
+	"sales_dash_order_book": {
+		"module_key": "sales_orders",
+		"legacy_method": "erp_analysis.sales_orders.get_order_book_dashboard",
+	},
+	"sales_dash_gross_profit": {
+		"module_key": "profitability",
+		"legacy_method": "erp_analysis.profitability.get_gross_profit_dashboard",
+	},
+	"sales_dash_exceptions": {
+		"module_key": "exceptions",
+		"legacy_method": "erp_analysis.exceptions.get_management_exceptions",
+	},
+	"receivables_dash_card": {
+		"module_key": "receivables",
+		"legacy_method": "erp_analysis.receivables.get_receivables_dashboard",
+	},
+	"receivables_total_kpi": {
+		"module_key": "receivables",
+		"metric_key": "total_receivable",
+		"widget_type": "KPI",
+	},
+	"receivables_overdue_kpi": {
+		"module_key": "receivables",
+		"metric_key": "overdue",
+		"widget_type": "KPI",
+	},
+	"receivables_current_kpi": {
+		"module_key": "receivables",
+		"metric_key": "current",
+		"widget_type": "KPI",
+	},
+	"receivables_overdue_pct_kpi": {
+		"module_key": "receivables",
+		"metric_key": "overdue_pct",
+		"widget_type": "KPI",
+	},
+	"receivables_customer_count_kpi": {
+		"module_key": "receivables",
+		"metric_key": "customer_count",
+		"widget_type": "KPI",
+	},
+	"inventory_dash_card": {
+		"module_key": "inventory",
+		"legacy_method": "erp_analysis.inventory.get_inventory_snapshot",
+	},
+	"collection_dash_card": {
+		"module_key": "collection",
+		"legacy_method": "erp_analysis.collection.get_collection_dashboard",
+	},
+	"executive_dash_card": {
+		"module_key": "executive",
+		"legacy_method": "erp_analysis.executive.get_executive_dashboard",
+	},
 }
 
 
@@ -62,6 +127,44 @@ def parse_widget_config_json(raw: Any) -> dict[str, Any]:
 		except Exception:
 			return {}
 	return {}
+
+
+def _period_from_widget(widget: dict[str, Any], config: Optional[dict[str, Any]] = None) -> str:
+	config = config or widget.get("config") or {}
+	raw = widget.get("period") or config.get("period") or "mtd"
+	return str(raw).strip().lower() or "mtd"
+
+
+def _compare_from_widget(
+	widget: dict[str, Any],
+	config: Optional[dict[str, Any]] = None,
+	compare_override: Optional[str] = None,
+) -> Optional[str]:
+	if compare_override:
+		key = compare_override.strip().lower()
+		return key or None
+	config = config or widget.get("config") or {}
+	if widget.get("show_ly"):
+		return "ly"
+	compare = config.get("compare")
+	if not compare:
+		return None
+	return str(compare).strip().lower() or None
+
+
+def _filters_cache_key(filters: Any) -> str:
+	if filters is None:
+		return ""
+	if isinstance(filters, str):
+		return filters
+	try:
+		return json.dumps(filters, sort_keys=True, default=str)
+	except Exception:
+		return str(filters)
+
+
+def clear_dashboard_board_cache() -> None:
+	frappe.cache().delete_keys("mobile_board_data:*")
 
 
 def resolve_chart_dimension(
@@ -96,6 +199,37 @@ def next_drill_dimension(current_dimension: str, config: dict[str, Any]) -> Opti
 	if idx is None or idx + 1 >= len(drill_path):
 		return None
 	return drill_path[idx + 1]
+
+
+def _resolve_effective_view(
+	widget: dict[str, Any],
+	*,
+	drill_depth: Optional[int] = None,
+	dimension_override: Optional[str] = None,
+) -> str:
+	config = widget.get("config") or {}
+	widget_type = (widget.get("widget_type") or "LIST").upper()
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+	drill_views = config.get("drill_views") or {}
+
+	depth = drill_depth
+	if dimension_override and drill_path:
+		depth = _depth_for_dimension(dimension_override, drill_path)
+	elif depth is None and drill_path:
+		depth = 0
+
+	if drill_views and depth is not None:
+		view = drill_views.get(str(depth))
+		if view is None:
+			view = drill_views.get(depth)
+		if view:
+			return str(view).strip().lower()
+
+	if widget_type in TABLE_WIDGET_TYPES:
+		return "table"
+	if widget_type in CHART_WIDGET_TYPES:
+		return widget_type.lower()
+	return widget_type.lower()
 
 
 def _normalize_drill_path(raw: Any) -> list[str]:
@@ -149,14 +283,26 @@ def resolve_widget_action(widget: dict[str, Any]) -> dict[str, Any]:
 	)
 
 
-def _resolve_compare_mode(config: dict[str, Any], compare_override: Optional[str] = None) -> Optional[str]:
-	if compare_override:
-		key = compare_override.strip().lower()
-		return key or None
-	compare = config.get("compare")
-	if not compare:
-		return None
-	return str(compare).strip().lower() or None
+def _merge_widget_definition(key: str, row: dict[str, Any]) -> dict[str, Any]:
+	defaults = dict(WIDGET_DEFAULTS.get(key, {}))
+	config = parse_widget_config_json(row.get("config_json")) or row.get("config") or {}
+	return {
+		"key": key,
+		"label": row.get("label") or defaults.get("label") or key.replace("_", " ").title(),
+		"widget_type": (row.get("widget_type") or defaults.get("widget_type") or "LIST").upper(),
+		"module_key": row.get("module_key") or defaults.get("module_key"),
+		"metric_key": row.get("metric_key") or defaults.get("metric_key"),
+		"dimension_key": row.get("dimension_key") or defaults.get("dimension_key"),
+		"secondary_dimension_key": row.get("secondary_dimension_key") or defaults.get("secondary_dimension_key"),
+		"legacy_method": defaults.get("legacy_method"),
+		"size": row.get("size") or "md",
+		"dashboard_id": row.get("dashboard_id"),
+		"period": row.get("period"),
+		"show_ly": row.get("show_ly"),
+		"show_currency_symbol": row.get("show_currency_symbol"),
+		"table_columns_json": row.get("table_columns_json"),
+		"config": config,
+	}
 
 
 def resolve_widget_definition(
@@ -169,7 +315,6 @@ def resolve_widget_definition(
 	if not key:
 		frappe.throw(_("widget_key is required"), frappe.ValidationError)
 
-	defaults = dict(WIDGET_DEFAULTS.get(key, {}))
 	profile_name = resolve_mobile_app_profile_name(user=user, company=company)
 	row: dict[str, Any] = {}
 
@@ -181,25 +326,10 @@ def resolve_widget_definition(
 				row = widget
 				break
 
-	if not row and not defaults:
+	if not row and key not in WIDGET_DEFAULTS:
 		frappe.throw(_("Unknown dashboard widget: {0}").format(key), frappe.ValidationError)
 
-	config = row.get("config") or parse_widget_config_json(row.get("config_json"))
-
-	merged = {
-		"key": key,
-		"label": row.get("label") or defaults.get("label") or key.replace("_", " ").title(),
-		"widget_type": (row.get("widget_type") or defaults.get("widget_type") or "LIST").upper(),
-		"module_key": row.get("module_key") or defaults.get("module_key"),
-		"metric_key": row.get("metric_key") or defaults.get("metric_key"),
-		"dimension_key": row.get("dimension_key") or defaults.get("dimension_key"),
-		"secondary_dimension_key": row.get("secondary_dimension_key") or defaults.get("secondary_dimension_key"),
-		"legacy_method": defaults.get("legacy_method"),
-		"size": row.get("size") or "md",
-		"dashboard_id": row.get("dashboard_id"),
-		"config": config,
-	}
-	return merged
+	return _merge_widget_definition(key, row)
 
 
 def get_dashboard_widget_data(
@@ -215,7 +345,7 @@ def get_dashboard_widget_data(
 	compare: Optional[str] = None,
 	**kwargs,
 ) -> dict[str, Any]:
-	"""Return chart series or legacy payload for one bootstrap dashboard widget."""
+	"""Return chart/table/KPI or legacy payload for one bootstrap dashboard widget."""
 	user = user or frappe.session.user
 	company = company or kwargs.get("company")
 	widget_key = widget_key or kwargs.get("widget_key")
@@ -236,12 +366,192 @@ def get_dashboard_widget_data(
 		scope_module="sales" if module_key in ("sales", "sales_performance", "collection") else module_key,
 	)
 	company = ctx["company"]
+
+	reset_batch_kpi_cache()
+	return _build_widget_payload(
+		user,
+		company,
+		widget,
+		from_date=from_date,
+		to_date=to_date,
+		limit=limit,
+		dimension_override=dimension,
+		filters=filters,
+		drill_depth=drill_depth,
+		compare_override=compare,
+		extra=kwargs,
+	)
+
+
+def get_dashboard_board_data(
+	user: Optional[str] = None,
+	dashboard_id: Optional[str] = None,
+	company: Optional[str] = None,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	limit: int = 10,
+	use_cache: bool = True,
+	refresh: bool = False,
+	**kwargs,
+) -> dict[str, Any]:
+	"""Load all widgets for one dashboard board in a single request."""
+	user = user or frappe.session.user
+	requested_dashboard_id = (dashboard_id or kwargs.get("dashboard_id") or "home").strip()
+	dashboard_id = resolve_dashboard_board_id(requested_dashboard_id)
+	limit = int(kwargs.get("limit") or limit or 10)
+	from erp_analysis.utils.rpc import to_bool
+
+	use_cache = to_bool(kwargs.get("use_cache", use_cache), True)
+	refresh = to_bool(kwargs.get("refresh", refresh), False)
+
+	profile_name = resolve_mobile_app_profile_name(user=user, company=company)
+	if not profile_name:
+		frappe.throw(_("No mobile profile configured for user"), frappe.ValidationError)
+
+	profile_modified = frappe.db.get_value("Mobile App Profile", profile_name, "modified")
+	raw_widgets = get_profile_widgets(profile_name, dashboard_id=dashboard_id)
+	if not raw_widgets:
+		frappe.throw(
+			_("No widgets configured for dashboard {0}").format(dashboard_id),
+			frappe.ValidationError,
+		)
+
+	resolved_widgets: list[dict[str, Any]] = []
+	for row in raw_widgets:
+		key = (row.get("key") or "").strip()
+		if not key:
+			continue
+		widget = _merge_widget_definition(key, row)
+		module_key = widget.get("module_key")
+		guard_mobile_api(
+			company=company,
+			module_key=module_key,
+			scope_module="sales" if module_key in ("sales", "sales_performance", "collection") else module_key,
+		)
+		resolved_widgets.append(widget)
+
+	if not resolved_widgets:
+		frappe.throw(
+			_("No accessible widgets for dashboard {0}").format(dashboard_id),
+			frappe.ValidationError,
+		)
+
+	from erp_analysis.api import _get_my_access
+
+	access = _get_my_access(user=user, company=company)
+	effective_company = get_effective_company(user=user, requested=company, access=access)
+
+	cache_key = (
+		f"mobile_board_data:v1:{user}:{dashboard_id}:{effective_company or ''}:"
+		f"{limit}:{from_date or ''}:{to_date or ''}:{profile_modified}"
+	)
+	if use_cache and not refresh:
+		cached = frappe.cache().get_value(cache_key)
+		if cached:
+			return cached
+
+	reset_batch_kpi_cache()
+	warm_batch_kpi_cache(user, effective_company, resolved_widgets)
+
+	widgets_out: dict[str, Any] = {}
+	errors: dict[str, str] = {}
+	for widget in resolved_widgets:
+		key = widget["key"]
+		try:
+			payload = _build_widget_payload(
+				user,
+				effective_company,
+				widget,
+				from_date=from_date,
+				to_date=to_date,
+				limit=limit,
+			)
+			payload = dict(payload)
+			alias_keys = payload.pop("_alias_keys", None) or []
+			widgets_out[key] = payload
+			config = widget.get("config") or {}
+			kpi_id = config.get("kpi_id")
+			if kpi_id and payload.get("widget_type") == "KPI":
+				widgets_out[str(kpi_id).strip()] = payload
+			chart_key = config.get("chart_key") or (payload.get("meta") or {}).get("chart_key")
+			if chart_key and payload.get("widget_type") in CHART_WIDGET_TYPES:
+				widgets_out[str(chart_key).strip()] = payload
+			for alias in alias_keys:
+				alias_key = str(alias).strip()
+				if alias_key:
+					widgets_out[alias_key] = payload
+		except Exception as exc:
+			errors[key] = str(exc)
+			frappe.log_error(title=f"dashboard_board.{key}", message=frappe.get_traceback())
+
+	result = {
+		"dashboard_id": dashboard_id,
+		"requested_dashboard_id": requested_dashboard_id,
+		"widgets": widgets_out,
+		"errors": errors or None,
+		"meta": {
+			"schema_version": 1,
+			"widget_count": len(widgets_out),
+			"cached_at": datetime.utcnow().isoformat() + "Z",
+			"company": effective_company,
+			"profile": profile_name,
+			"resolved_from": requested_dashboard_id if requested_dashboard_id != dashboard_id else None,
+		},
+	}
+
+	if use_cache:
+		frappe.cache().set_value(cache_key, result, expires_in_sec=BOARD_DATA_CACHE_TTL)
+
+	return result
+
+
+def _build_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	*,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	limit: int = 10,
+	dimension_override: Optional[str] = None,
+	filters: Any = None,
+	drill_depth: Optional[int] = None,
+	compare_override: Optional[str] = None,
+	extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
 	widget_type = widget["widget_type"]
+	effective_view = _resolve_effective_view(
+		widget,
+		drill_depth=drill_depth,
+		dimension_override=dimension_override,
+	)
 
 	if widget_type in NAV_WIDGET_TYPES:
 		return _link_widget_payload(widget)
-
-	if widget_type in CHART_WIDGET_TYPES:
+	if widget_type == "KPI":
+		return _kpi_widget_payload(
+			user,
+			company,
+			widget,
+			from_date,
+			to_date,
+			filters=filters,
+			compare_override=compare_override,
+		)
+	if widget_type in TABLE_WIDGET_TYPES or effective_view == "table":
+		return _table_widget_payload(
+			user,
+			company,
+			widget,
+			from_date,
+			to_date,
+			limit,
+			dimension_override=dimension_override,
+			filters=filters,
+			drill_depth=drill_depth,
+			compare_override=compare_override,
+		)
+	if widget_type in CHART_WIDGET_TYPES or effective_view in ("pie", "donut", "bar", "line"):
 		return _chart_widget_payload(
 			user,
 			company,
@@ -249,19 +559,483 @@ def get_dashboard_widget_data(
 			from_date,
 			to_date,
 			limit,
-			dimension_override=dimension,
+			dimension_override=dimension_override,
 			filters=filters,
 			drill_depth=drill_depth,
-			compare_override=compare,
+			compare_override=compare_override,
+			render_hint=effective_view if effective_view in ("pie", "donut", "bar", "line") else None,
 		)
-
 	if widget_type == "MATRIX":
 		frappe.throw(
 			_("MATRIX widgets require secondary_dimension (not supported in v1 widget data API yet)"),
 			frappe.ValidationError,
 		)
 
-	return _legacy_widget_payload(user, company, widget, from_date, to_date, limit, kwargs)
+	return _legacy_widget_payload(user, company, widget, from_date, to_date, limit, extra or {})
+
+
+def _widget_data_source(config: dict[str, Any]) -> Optional[str]:
+	raw = config.get("payload_source") or config.get("data_source")
+	if not raw:
+		return None
+	return str(raw).strip().lower() or None
+
+
+def _trend_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	from_date: Optional[str],
+	to_date: Optional[str],
+	*,
+	filters: Any = None,
+	compare_override: Optional[str] = None,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	metric = (widget.get("metric_key") or config.get("metric") or "net_sales").strip().lower()
+	group_by = (config.get("group_by") or "month").strip().lower()
+	period = _period_from_widget(widget, config)
+	compare_mode = _compare_from_widget(widget, config, compare_override)
+
+	from erp_analysis.services.sales_trends import get_sales_trends
+
+	trends = get_sales_trends(
+		user=user,
+		company=company,
+		from_date=from_date,
+		to_date=to_date,
+		group_by=group_by,
+		metric=metric,
+		filters=filters,
+		compare=compare_mode,
+		period=period,
+	)
+
+	series = []
+	for row in trends.get("series") or []:
+		point = {
+			"label": row.get("label") or row.get("period"),
+			"value": row.get("value"),
+			"period": row.get("period"),
+		}
+		if compare_mode:
+			_apply_compare_point(point, row, compare_mode)
+		series.append(point)
+
+	show_currency = widget.get("show_currency_symbol")
+	if show_currency is None:
+		show_currency = _is_currency_metric(metric)
+
+	widget_type = widget["widget_type"]
+	hint = widget_type.lower() if widget_type in CHART_WIDGET_TYPES else "line"
+
+	return {
+		"widget_key": widget["key"],
+		"widget_type": widget_type,
+		"label": widget.get("label"),
+		"chart": {
+			"series": series,
+			"metric": metric,
+			"group_by": group_by,
+			"filters": (trends.get("meta") or {}).get("filters") or {},
+			"compare": compare_mode,
+			"compare_label": _compare_column_label(compare_mode),
+			"show_currency_symbol": bool(show_currency),
+			"comparison": trends.get("comparison"),
+		},
+		"meta": {
+			"schema_version": 1,
+			**(trends.get("meta") or {}),
+			"render_hint": hint,
+			"data_source": "trend",
+		},
+	}
+
+
+def _customer_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	from_date: Optional[str],
+	to_date: Optional[str],
+	limit: int,
+	*,
+	filters: Any = None,
+	compare_override: Optional[str] = None,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	section = (config.get("section") or "top").strip().lower()
+	period = _period_from_widget(widget, config)
+	compare_mode = _compare_from_widget(widget, config, compare_override)
+
+	from erp_analysis.services.sales_customers import get_sales_customer_analysis
+
+	analysis = get_sales_customer_analysis(
+		user=user,
+		company=company,
+		section=section,
+		from_date=from_date,
+		to_date=to_date,
+		period=period,
+		filters=filters,
+		limit=limit,
+		compare=compare_mode,
+		inactive_days=int(config.get("inactive_days") or 90),
+		decline_threshold_pct=float(config.get("decline_threshold_pct") or 10),
+		concentration_top_n=int(config.get("concentration_top_n") or 10),
+	)
+
+	rows = []
+	for row in analysis.get("data") or []:
+		if section == "concentration":
+			rows.append(
+				{
+					"dimension": row.get("label"),
+					"metric": row.get("contribution_pct"),
+					"contribution_pct": row.get("contribution_pct"),
+					"top_n": row.get("top_n"),
+				}
+			)
+		else:
+			rows.append(
+				{
+					"dimension": row.get("customer_name") or row.get("customer"),
+					"dimension_value": row.get("customer"),
+					"metric": row.get("net_sales") or row.get("sales"),
+					"metric_ly": row.get("comparison_sales"),
+					"change_pct": row.get("growth_pct") or row.get("variance_pct"),
+					"gross_profit": row.get("gross_profit"),
+					"gp_pct": row.get("gp_pct"),
+					"contribution_pct": row.get("contribution_pct"),
+					"invoice_count": row.get("invoice_count"),
+					"rank": row.get("rank"),
+					"decline_pct": row.get("decline_pct"),
+					"days_inactive": row.get("days_inactive"),
+					"last_invoice_date": row.get("last_invoice_date"),
+					"first_invoice_date": row.get("first_invoice_date"),
+				}
+			)
+
+	columns = _parse_table_columns(widget, compare=compare_mode or False)
+	if section == "concentration":
+		columns = config.get("table_columns") or [
+			{"key": "dimension", "label": "Segment", "flex": 1.4, "align": "left"},
+			{"key": "metric", "label": "Contribution %", "format": "percent", "flex": 1, "align": "right"},
+		]
+
+	return {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"table": {
+			"columns": columns,
+			"rows": rows,
+			"section": section,
+			"filters": (analysis.get("meta") or {}).get("filters") or {},
+			"compare": compare_mode,
+			"show_currency_symbol": False,
+		},
+		"meta": {
+			"schema_version": 1,
+			**(analysis.get("meta") or {}),
+			"render_hint": "ranking" if widget["widget_type"] == "RANKING" else "table",
+			"data_source": "customer",
+		},
+	}
+
+
+def _attention_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	limit: int,
+	*,
+	compare_override: Optional[str] = None,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	section = (config.get("section") or "all").strip().lower()
+	period = _period_from_widget(widget, config)
+
+	from erp_analysis.services.sales_attention import get_sales_attention
+
+	result = get_sales_attention(
+		user=user,
+		company=company,
+		section=section,
+		limit=limit,
+		period=period,
+		decline_threshold_pct=float(config.get("decline_threshold_pct") or 25),
+		stale_so_days=int(config.get("stale_so_days") or 90),
+	)
+
+	rows = []
+	for alert in result.get("data") or []:
+		rows.append(
+			{
+				"dimension": alert.get("title"),
+				"dimension_value": alert.get("entity_name"),
+				"metric": alert.get("value"),
+				"severity": alert.get("severity"),
+				"alert_type": alert.get("type"),
+				"description": alert.get("description"),
+				"entity_type": alert.get("entity_type"),
+				"reference_doctype": alert.get("reference_doctype"),
+				"reference_name": alert.get("reference_name"),
+				"drilldown": alert.get("drilldown"),
+			}
+		)
+
+	columns = config.get("table_columns") or [
+		{"key": "dimension", "label": "Alert", "flex": 1.6, "align": "left"},
+		{"key": "description", "label": "Detail", "flex": 1.4, "align": "left"},
+		{"key": "metric", "label": "Value", "format": "currency_compact", "flex": 1, "align": "right"},
+	]
+
+	return {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"table": {
+			"columns": columns,
+			"rows": rows,
+			"section": section,
+			"compare": None,
+			"show_currency_symbol": section not in ("sales_down",),
+		},
+		"meta": {
+			"schema_version": 1,
+			**(result.get("meta") or {}),
+			"render_hint": "ranking" if widget["widget_type"] == "RANKING" else "table",
+			"data_source": "attention",
+		},
+	}
+
+
+def _kpi_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	from_date: Optional[str],
+	to_date: Optional[str],
+	*,
+	filters: Any = None,
+	compare_override: Optional[str] = None,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	metric = (widget.get("metric_key") or "net_sales").strip().lower()
+	module_key = (widget.get("module_key") or "sales").strip().lower()
+	period = _period_from_widget(widget, config)
+	compare = _compare_from_widget(widget, config, compare_override)
+	filters_key = _filters_cache_key(filters)
+	cache_metric = f"{module_key}:{metric}" if module_key != "sales" else metric
+
+	kpi = get_cached_kpi(company, cache_metric, period, compare, filters_key)
+	if kpi is None:
+		from erp_analysis.services.module_kpis import get_module_kpi, is_module_kpi
+
+		if is_module_kpi(module_key, metric):
+			kpi = get_module_kpi(
+				user=user,
+				company=company,
+				module_key=module_key,
+				metric_key=metric,
+				period=period,
+			)
+		else:
+			from erp_analysis.services.analytics_sales import get_sales_kpi
+
+			kpi = get_sales_kpi(
+				user=user,
+				company=company,
+				metric=metric,
+				from_date=from_date,
+				to_date=to_date,
+				period=period,
+				filters=filters,
+				compare=compare,
+			)
+		set_cached_kpi(company, cache_metric, period, compare, filters_key, kpi)
+
+	format_hint = config.get("format") or kpi.get("meta", {}).get("format") or _default_format_for_metric(metric)
+	show_currency = widget.get("show_currency_symbol")
+	if show_currency is None:
+		show_currency = _is_currency_metric(metric)
+	kpi_id = config.get("kpi_id") or metric
+
+	return {
+		"widget_key": widget["key"],
+		"widget_type": "KPI",
+		"label": widget.get("label"),
+		"kpi": {
+			"kpi_id": kpi_id,
+			"value": kpi.get("value"),
+			"value_ly": kpi.get("value_ly"),
+			"change_pct": kpi.get("change_pct"),
+			"direction": kpi.get("direction"),
+			"metric": metric,
+			"label": kpi.get("label") or widget.get("label"),
+			"format": format_hint,
+			"show_currency_symbol": bool(show_currency),
+			"subtitle": config.get("subtitle"),
+		},
+		"value": kpi.get("value"),
+		"data": {
+			"value": kpi.get("value"),
+			"format": format_hint,
+			"kpi_id": kpi_id,
+		},
+		"meta": {
+			"schema_version": 1,
+			**(kpi.get("meta") or {}),
+			"render_hint": "kpi",
+			"kpi_id": kpi_id,
+			"format": format_hint,
+			"section_title": config.get("section_title"),
+			"row_group": config.get("row_group"),
+		},
+	}
+
+
+def _table_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	from_date: Optional[str],
+	to_date: Optional[str],
+	limit: int,
+	*,
+	dimension_override: Optional[str] = None,
+	filters: Any = None,
+	drill_depth: Optional[int] = None,
+	compare_override: Optional[str] = None,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	if _widget_data_source(config) == "attention":
+		return _attention_widget_payload(
+			user,
+			company,
+			widget,
+			limit,
+			compare_override=compare_override,
+		)
+	if _widget_data_source(config) == "customer":
+		return _customer_widget_payload(
+			user,
+			company,
+			widget,
+			from_date,
+			to_date,
+			limit,
+			filters=filters,
+			compare_override=compare_override,
+		)
+	if _widget_data_source(config) == "legacy_table":
+		return _legacy_table_widget_payload(user, company, widget, limit)
+	if _widget_data_source(config) == "legacy_chart" and widget["widget_type"] == "RANKING":
+		return _legacy_ranking_from_chart_payload(user, company, widget, limit)
+
+	metric = widget.get("metric_key") or "net_sales"
+	dimension, config, resolved_depth = resolve_chart_dimension(
+		widget,
+		dimension_override=dimension_override,
+		drill_depth=drill_depth,
+	)
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+	next_dim = next_drill_dimension(dimension, config)
+	compare_mode = _compare_from_widget(widget, config, compare_override)
+	period = _period_from_widget(widget, config)
+	use_extended = bool(config.get("extended_metrics"))
+
+	if use_extended:
+		from erp_analysis.services.analytics_sales import get_sales_performance
+
+		analysis = get_sales_performance(
+			user=user,
+			company=company,
+			from_date=from_date,
+			to_date=to_date,
+			dimension=dimension,
+			filters=filters,
+			limit=limit,
+			compare=compare_mode,
+			period=period,
+		)
+	else:
+		from erp_analysis.services.analytics_sales import get_sales_analysis
+
+		analysis = get_sales_analysis(
+			user=user,
+			company=company,
+			from_date=from_date,
+			to_date=to_date,
+			dimension=dimension,
+			metric=metric,
+			filters=filters,
+			limit=limit,
+			compare=compare_mode,
+			period=period,
+		)
+
+	rows = []
+	for row in analysis.get("data") or []:
+		if use_extended:
+			rows.append(
+				{
+					"dimension": row.get("label") or row.get("dimension_value"),
+					"dimension_value": row.get("dimension_value"),
+					"metric": row.get("net_sales") or row.get("metric_value"),
+					"metric_ly": row.get("comparison_sales"),
+					"change_pct": row.get("variance_pct"),
+					"gross_profit": row.get("gross_profit"),
+					"gp_pct": row.get("gp_pct"),
+					"contribution_pct": row.get("contribution_pct"),
+					"invoice_count": row.get("invoice_count"),
+					"quantity": row.get("quantity"),
+					"rank": row.get("rank"),
+				}
+			)
+		else:
+			rows.append(
+				{
+					"dimension": row.get("label") or row.get("dimension_value"),
+					"dimension_value": row.get("dimension_value"),
+					"metric": row.get("metric_value"),
+					"metric_ly": row.get("metric_value_ly"),
+					"change_pct": row.get("change_pct"),
+					"rank": row.get("rank"),
+				}
+			)
+
+	columns = _parse_table_columns(widget, compare=compare_mode or False)
+	applied_filters = (analysis.get("meta") or {}).get("filters") or {}
+	show_currency = widget.get("show_currency_symbol")
+	if show_currency is None:
+		show_currency = _is_currency_metric(metric)
+
+	return {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"table": {
+			"columns": columns,
+			"rows": rows,
+			"metric": metric,
+			"dimension": dimension,
+			"filters": applied_filters,
+			"compare": compare_mode,
+			"show_currency_symbol": bool(show_currency),
+			"extended_metrics": use_extended,
+		},
+		"meta": {
+			"schema_version": 1,
+			**(analysis.get("meta") or {}),
+			"render_hint": "ranking" if widget["widget_type"] == "RANKING" else "table",
+			"drill_path": drill_path or None,
+			"drill_depth": resolved_depth,
+			"next_dimension": next_dim,
+			"drillable": bool(next_dim),
+		},
+	}
 
 
 def _chart_widget_payload(
@@ -276,7 +1050,54 @@ def _chart_widget_payload(
 	filters: Any = None,
 	drill_depth: Optional[int] = None,
 	compare_override: Optional[str] = None,
+	render_hint: Optional[str] = None,
 ) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	if _widget_data_source(config) == "trend":
+		payload = _trend_widget_payload(
+			user,
+			company,
+			widget,
+			from_date,
+			to_date,
+			filters=filters,
+			compare_override=compare_override,
+		)
+		if render_hint:
+			payload["meta"]["render_hint"] = render_hint
+		return payload
+	if _widget_data_source(config) == "legacy_chart":
+		payload = _legacy_chart_widget_payload(
+			user,
+			company,
+			widget,
+			limit,
+			render_hint=render_hint,
+		)
+		if render_hint:
+			payload["meta"]["render_hint"] = render_hint
+		return payload
+	if _widget_data_source(config) == "legacy" and config.get("legacy_method"):
+		payload = _call_legacy_method(
+			config.get("legacy_method"),
+			company=company,
+			limit=limit,
+			extra=config.get("legacy_params"),
+		)
+		section_meta = _legacy_widget_section_meta(config)
+		return {
+			"widget_key": widget["key"],
+			"widget_type": widget["widget_type"],
+			"label": widget.get("label"),
+			"data": payload,
+			"meta": {
+				"schema_version": 1,
+				"legacy_method": config.get("legacy_method"),
+				"render_hint": "list",
+				**section_meta,
+			},
+		}
+
 	metric = widget.get("metric_key") or "net_sales"
 	dimension, config, resolved_depth = resolve_chart_dimension(
 		widget,
@@ -285,7 +1106,8 @@ def _chart_widget_payload(
 	)
 	drill_path = _normalize_drill_path(config.get("drill_path"))
 	next_dim = next_drill_dimension(dimension, config)
-	compare_mode = _resolve_compare_mode(config, compare_override)
+	compare_mode = _compare_from_widget(widget, config, compare_override)
+	period = _period_from_widget(widget, config)
 
 	from erp_analysis.services.analytics_sales import get_sales_analysis
 
@@ -299,6 +1121,7 @@ def _chart_widget_payload(
 		filters=filters,
 		limit=limit,
 		compare=compare_mode,
+		period=period,
 	)
 
 	series = []
@@ -308,12 +1131,15 @@ def _chart_widget_payload(
 			"value": row.get("metric_value"),
 			"dimension_value": row.get("dimension_value"),
 		}
-		if compare_mode == "ly":
-			point["value_ly"] = row.get("metric_value_ly")
-			point["change_pct"] = row.get("change_pct")
+		if compare_mode:
+			_apply_compare_point(point, row, compare_mode)
 		series.append(point)
 
 	applied_filters = (analysis.get("meta") or {}).get("filters") or {}
+	show_currency = widget.get("show_currency_symbol")
+	if show_currency is None:
+		show_currency = _is_currency_metric(metric)
+	hint = render_hint or widget["widget_type"].lower()
 
 	return {
 		"widget_key": widget["key"],
@@ -325,17 +1151,96 @@ def _chart_widget_payload(
 			"dimension": dimension,
 			"filters": applied_filters,
 			"compare": compare_mode,
+			"compare_label": _compare_column_label(compare_mode),
+			"show_currency_symbol": bool(show_currency),
 		},
 		"meta": {
 			"schema_version": 1,
 			**(analysis.get("meta") or {}),
-			"render_hint": widget["widget_type"].lower(),
+			"render_hint": hint,
 			"drill_path": drill_path or None,
 			"drill_depth": resolved_depth,
 			"next_dimension": next_dim,
 			"drillable": bool(next_dim),
 		},
 	}
+
+
+def _parse_table_columns(widget: dict[str, Any], *, compare: bool | str | None = False) -> list[dict[str, Any]]:
+	raw = widget.get("table_columns_json")
+	if not raw:
+		config = widget.get("config") or {}
+		raw = config.get("table_columns")
+	if isinstance(raw, str) and raw.strip():
+		try:
+			parsed = json.loads(raw)
+			if isinstance(parsed, list):
+				return parsed
+		except Exception:
+			pass
+	if isinstance(raw, list):
+		return raw
+	return _default_table_columns(compare=compare)
+
+
+def _default_table_columns(*, compare: bool | str | None = False) -> list[dict[str, Any]]:
+	columns = [
+		{"key": "dimension", "label": "Name", "flex": 1.4, "align": "left", "min_width": 72},
+		{"key": "metric", "label": "Value", "format": "currency_compact", "flex": 1.1, "align": "right", "min_width": 72},
+	]
+	if compare:
+		columns.extend(
+			[
+				{
+					"key": "metric_ly",
+					"label": _compare_column_label(compare),
+					"format": "currency_compact",
+					"flex": 1.2,
+					"align": "right",
+					"min_width": 80,
+				},
+				{"key": "change_pct", "label": "Δ%", "format": "percent", "width": 56, "align": "right"},
+			]
+		)
+	return columns
+
+
+def _compare_column_label(compare_mode: bool | str | None) -> str:
+	if compare_mode in ("previous_period", "prev"):
+		return "Prev"
+	if compare_mode in ("ly", "previous_year"):
+		return "LY"
+	if isinstance(compare_mode, str) and compare_mode:
+		return "Compare"
+	return "LY"
+
+
+def _apply_compare_point(point: dict[str, Any], row: dict[str, Any], compare_mode: Optional[str]) -> None:
+	if not compare_mode:
+		return
+	point["value_ly"] = row.get("value_ly") or row.get("metric_value_ly") or row.get("comparison_sales")
+	point["change_pct"] = row.get("change_pct") or row.get("variance_pct")
+
+
+def _default_format_for_metric(metric: str) -> str:
+	if metric in ("transactions", "sales_qty", "customer_count"):
+		return "integer"
+	if metric in ("gp_pct", "discount_pct"):
+		return "percent"
+	if metric in ("net_sales", "gross_sales", "average_transaction", "gross_profit", "discount_amount", "sales_return"):
+		return "currency_compact"
+	return "number"
+
+
+def _is_currency_metric(metric: str) -> bool:
+	return metric in (
+		"net_sales",
+		"gross_sales",
+		"average_transaction",
+		"gross_profit",
+		"discount_amount",
+		"sales_return",
+	)
 
 
 def _link_widget_payload(widget: dict[str, Any]) -> dict[str, Any]:
@@ -352,6 +1257,391 @@ def _link_widget_payload(widget: dict[str, Any]) -> dict[str, Any]:
 	}
 
 
+def _call_legacy_method(
+	method_path: str,
+	*,
+	company: Optional[str] = None,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	limit: Optional[int] = None,
+	extra: Optional[dict[str, Any]] = None,
+) -> Any:
+	method = frappe.get_attr(method_path)
+	params = inspect.signature(method).parameters
+	call_kwargs: dict[str, Any] = {}
+	if "company" in params and company:
+		call_kwargs["company"] = company
+	if "from_date" in params and from_date:
+		call_kwargs["from_date"] = from_date
+	if "to_date" in params and to_date:
+		call_kwargs["to_date"] = to_date
+	if "limit" in params and limit:
+		call_kwargs["limit"] = limit
+	if "fast" in params:
+		call_kwargs["fast"] = bool((extra or {}).get("fast", True))
+	for optional_key in ("months", "warehouse", "territory", "old_days"):
+		if optional_key in params and optional_key in (extra or {}):
+			call_kwargs[optional_key] = extra[optional_key]
+	return method(**call_kwargs)
+
+
+def _extract_rows(payload: Any, rows_key: str) -> list[Any]:
+	data = payload
+	for part in (rows_key or "rows").split("."):
+		if not isinstance(data, dict):
+			return []
+		data = data.get(part)
+	if isinstance(data, list):
+		return data
+	if isinstance(data, dict):
+		return data
+	return []
+
+
+def _legacy_series_from_payload(payload: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
+	if isinstance(payload, dict) and isinstance(payload.get("series"), list):
+		out: list[dict[str, Any]] = []
+		for point in payload["series"]:
+			if not isinstance(point, dict):
+				continue
+			label = point.get("label")
+			if label is None:
+				continue
+			row = {
+				"label": str(label),
+				"value": round(float(point.get("value") or 0), 2),
+			}
+			if point.get("dimension_value") is not None:
+				row["dimension_value"] = point.get("dimension_value")
+			out.append(row)
+		return out
+
+	rows_key = config.get("rows_key") or "rows"
+	mode = (config.get("rows_mode") or "list").strip().lower()
+	label_field = config.get("label_field") or "label"
+	value_field = config.get("value_field") or "value"
+	label_map = config.get("label_map") or {}
+
+	raw = payload
+	if rows_key:
+		for part in rows_key.split("."):
+			if not isinstance(raw, dict):
+				raw = None
+				break
+			raw = raw.get(part)
+
+	if mode == "dict_to_series" and isinstance(raw, dict):
+		series: list[dict[str, Any]] = []
+		key_order = list(label_map.keys()) if label_map else list(raw.keys())
+		for key in key_order:
+			if key not in raw:
+				continue
+			val = raw[key]
+			amount = float(val.get(value_field) if isinstance(val, dict) else val or 0)
+			if amount <= 0:
+				continue
+			series.append(
+				{
+					"label": label_map.get(key, str(key).replace("_", " ").title()),
+					"value": round(amount, 2),
+				}
+			)
+		return series
+
+	rows = raw if isinstance(raw, list) else _extract_rows(payload, rows_key)
+	value_fields = config.get("value_fields")
+	min_value = float(config.get("min_value") or 0)
+	out: list[dict[str, Any]] = []
+	for row in rows:
+		if not isinstance(row, dict):
+			continue
+		label = row.get(label_field) or row.get("category") or row.get("territory") or row.get("period")
+		if label is None:
+			continue
+		if isinstance(value_fields, list) and value_fields:
+			value = sum(float(row.get(field) or 0) for field in value_fields)
+		else:
+			value = row.get(value_field) or row.get("value") or row.get("outstanding") or row.get("amount")
+		amount = round(float(value or 0), 2)
+		if amount < min_value:
+			continue
+		out.append({"label": str(label), "value": amount})
+
+	sort_by = (config.get("sort_by") or "").strip().lower()
+	if sort_by in ("value_desc", "desc", "value"):
+		out.sort(key=lambda p: float(p.get("value") or 0), reverse=True)
+	elif sort_by in ("value_asc", "asc"):
+		out.sort(key=lambda p: float(p.get("value") or 0))
+
+	row_limit = config.get("row_limit")
+	if row_limit is not None:
+		out = out[: int(row_limit)]
+
+	return out
+
+
+def _legacy_series_compat(series: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	"""Mirror analytics chart points (dimension_value) for older mobile renderers."""
+	out: list[dict[str, Any]] = []
+	for point in series:
+		if not isinstance(point, dict):
+			continue
+		label = point.get("label")
+		row = dict(point)
+		if label is not None and row.get("dimension_value") is None:
+			row["dimension_value"] = label
+		out.append(row)
+	return out
+
+
+def _legacy_ranking_series_from_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	series: list[dict[str, Any]] = []
+	for row in rows:
+		if not isinstance(row, dict):
+			continue
+		label = row.get("dimension") or row.get("label")
+		value = row.get("metric")
+		if label is None:
+			continue
+		series.append(
+			{
+				"label": str(label),
+				"value": round(float(value or 0), 2),
+				"dimension_value": str(label),
+			}
+		)
+	return series
+
+
+def _legacy_widget_section_meta(config: dict[str, Any]) -> dict[str, Any]:
+	meta: dict[str, Any] = {}
+	section_title = config.get("section_title")
+	if section_title:
+		meta["section_title"] = section_title
+	row_group = config.get("row_group")
+	if row_group:
+		meta["row_group"] = row_group
+	chart_key = config.get("chart_key")
+	if chart_key:
+		meta["chart_key"] = chart_key
+	return meta
+
+
+def _legacy_ranking_from_chart_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	limit: int,
+) -> dict[str, Any]:
+	"""Build RANKING table rows from a legacy chart API series (e.g. overdue customers)."""
+	config = widget.get("config") or {}
+	chart_payload = _legacy_chart_widget_payload(user, company, widget, limit)
+	series = chart_payload.get("series") or []
+	rows: list[dict[str, Any]] = []
+	for index, point in enumerate(series):
+		if not isinstance(point, dict):
+			continue
+		rows.append(
+			{
+				"rank": index + 1,
+				"dimension": point.get("label") or point.get("dimension_value"),
+				"metric": point.get("value"),
+				"days": point.get("days") or point.get("days_overdue"),
+			}
+		)
+
+	columns = config.get("columns") or [
+		{"key": "rank", "label": "#", "flex": 0.4, "align": "left"},
+		{"key": "dimension", "label": "Customer", "flex": 1.6, "align": "left"},
+		{"key": "metric", "label": "Overdue", "format": "currency_compact", "flex": 1, "align": "right"},
+		{"key": "days", "label": "Days", "format": "integer", "flex": 0.6, "align": "right"},
+	]
+	section_meta = _legacy_widget_section_meta(config)
+	ranking_series = _legacy_ranking_series_from_table_rows(rows)
+
+	result: dict[str, Any] = {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"table": {
+			"columns": columns,
+			"rows": rows,
+			"show_currency_symbol": True,
+		},
+		"rows": rows,
+		"data": {
+			"rows": rows,
+			"columns": columns,
+		},
+		"meta": {
+			"schema_version": 1,
+			"render_hint": "ranking",
+			**section_meta,
+			**(chart_payload.get("meta") or {}),
+		},
+	}
+	if ranking_series:
+		result["chart"] = {
+			"series": ranking_series,
+			"metric": widget.get("metric_key") or "value",
+			"show_currency_symbol": True,
+		}
+		result["series"] = ranking_series
+		result["data"]["series"] = ranking_series
+	return result
+
+
+def _legacy_chart_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	limit: int,
+	*,
+	render_hint: Optional[str] = None,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	method_path = config.get("legacy_method") or widget.get("legacy_method")
+	if not method_path:
+		frappe.throw(
+			_("Widget {0} has no legacy_method configured").format(widget["key"]),
+			frappe.ValidationError,
+		)
+
+	effective_limit = int(config.get("row_limit") or limit or 10)
+	payload = _call_legacy_method(
+		method_path,
+		company=company,
+		limit=effective_limit,
+		extra=config.get("legacy_params"),
+	)
+	series = _legacy_series_compat(_legacy_series_from_payload(payload, config))
+	metric = widget.get("metric_key") or config.get("metric") or "value"
+	dimension = (
+		widget.get("dimension_key")
+		or config.get("dimension")
+		or (payload.get("meta") or {}).get("dimension")
+		or config.get("label_field")
+		or "value"
+	)
+	show_currency = widget.get("show_currency_symbol")
+	if show_currency is None:
+		show_currency = True
+	hint = render_hint or widget["widget_type"].lower()
+	section_meta = _legacy_widget_section_meta(config)
+	payload_meta = payload.get("meta") if isinstance(payload, dict) else {}
+	api_chart_key = (payload_meta or {}).get("chart_key")
+	config_chart_key = section_meta.get("chart_key")
+	# Keep profile chart_key aliases — API meta may use short internal keys (e.g. "aging").
+	safe_payload_meta = {
+		k: v
+		for k, v in (payload_meta or {}).items()
+		if k not in ("schema_version", "chart_key")
+	}
+
+	result = {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"chart": {
+			"series": series,
+			"metric": metric,
+			"dimension": dimension,
+			"filters": {},
+			"show_currency_symbol": bool(show_currency),
+		},
+		"series": series,
+		"data": {"series": series},
+		"meta": {
+			"schema_version": 1,
+			"render_hint": hint,
+			"dimension": dimension,
+			"metric": metric,
+			"count": len(series),
+			**safe_payload_meta,
+			**section_meta,
+		},
+	}
+	if api_chart_key and config_chart_key and str(api_chart_key) != str(config_chart_key):
+		result["_alias_keys"] = [str(api_chart_key).strip()]
+	return result
+
+
+def _legacy_table_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	limit: int,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	method_path = config.get("legacy_method") or widget.get("legacy_method")
+	if not method_path:
+		frappe.throw(
+			_("Widget {0} has no legacy_method configured").format(widget["key"]),
+			frappe.ValidationError,
+		)
+
+	payload = _call_legacy_method(
+		method_path,
+		company=company,
+		limit=limit,
+		extra=config.get("legacy_params"),
+	)
+	mode = (config.get("rows_mode") or "list").strip().lower()
+	if mode == "dict_to_series":
+		raw_rows = _legacy_series_from_payload(payload, config)
+	else:
+		raw_rows = _extract_rows(payload, config.get("rows_key") or "rows")
+	row_limit = int(config.get("row_limit") or limit or 10)
+	columns_cfg = config.get("columns") or []
+
+	rows: list[dict[str, Any]] = []
+	for raw in raw_rows[:row_limit]:
+		if not isinstance(raw, dict):
+			continue
+		row_out: dict[str, Any] = {}
+		for col in columns_cfg:
+			key = col.get("key")
+			field = col.get("field") or key
+			if key and field:
+				row_out[key] = raw.get(field)
+		if row_out:
+			rows.append(row_out)
+
+	columns = columns_cfg if columns_cfg else _default_table_columns(compare=False)
+	section_meta = _legacy_widget_section_meta(config)
+	ranking_series = _legacy_ranking_series_from_table_rows(rows) if widget["widget_type"] == "RANKING" else []
+
+	result: dict[str, Any] = {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"table": {
+			"columns": columns,
+			"rows": rows,
+			"show_currency_symbol": True,
+		},
+		"rows": rows,
+		"data": {
+			"rows": rows,
+			"columns": columns,
+		},
+		"meta": {
+			"schema_version": 1,
+			"render_hint": "ranking" if widget["widget_type"] == "RANKING" else "table",
+			**section_meta,
+		},
+	}
+	if ranking_series:
+		result["chart"] = {
+			"series": ranking_series,
+			"metric": widget.get("metric_key") or "value",
+			"show_currency_symbol": True,
+		}
+		result["series"] = ranking_series
+		result["data"]["series"] = ranking_series
+	return result
+
+
 def _legacy_widget_payload(
 	user: str,
 	company: Optional[str],
@@ -361,25 +1651,23 @@ def _legacy_widget_payload(
 	limit: int,
 	extra: dict[str, Any],
 ) -> dict[str, Any]:
-	method_path = widget.get("legacy_method")
+	config = widget.get("config") or {}
+	method_path = config.get("legacy_method") or widget.get("legacy_method")
 	if not method_path:
 		frappe.throw(
 			_("Widget {0} has no legacy API mapping").format(widget["key"]),
 			frappe.ValidationError,
 		)
 
-	method = frappe.get_attr(method_path)
-	call_kwargs: dict[str, Any] = {}
-	if company:
-		call_kwargs["company"] = company
-	if from_date:
-		call_kwargs["from_date"] = from_date
-	if to_date:
-		call_kwargs["to_date"] = to_date
-	if limit:
-		call_kwargs["limit"] = limit
-	payload = method(**call_kwargs)
+	payload = _call_legacy_method(
+		method_path,
+		company=company,
+		from_date=from_date,
+		to_date=to_date,
+		limit=limit,
+	)
 
+	section_meta = _legacy_widget_section_meta(config)
 	return {
 		"widget_key": widget["key"],
 		"widget_type": widget.get("widget_type") or "LIST",
@@ -389,5 +1677,6 @@ def _legacy_widget_payload(
 			"schema_version": 1,
 			"legacy_method": method_path,
 			"render_hint": "list",
+			**section_meta,
 		},
 	}

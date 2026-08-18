@@ -7,6 +7,11 @@ from typing import Any, Literal, Optional
 import frappe
 from frappe import _
 
+from erp_analysis.fixtures.operations_dashboard_widgets import (
+	OPERATIONS_DASHBOARD_ACCESS_PARENT,
+	OPERATIONS_DASHBOARD_MODULE_KEYS,
+)
+from erp_analysis.fixtures.sales_dashboard_widgets import SALES_DASHBOARD_MODULE_KEYS
 from erp_analysis.security import require_authenticated_user
 from erp_analysis.services.mobile_profile import get_profile_context, resolve_mobile_app_profile_name
 
@@ -188,6 +193,17 @@ def resolve_stock_warehouse_scope(
 	return resolve_warehouse_scope(requested=requested, user=user, company=company)
 
 
+def _dashboard_module_allowed(module_key: str, allowed: set[str]) -> bool:
+	"""Dashboard More-menu tiles inherit parent module access (sales, receivables, …)."""
+	key = (module_key or "").strip().lower()
+	if key in allowed:
+		return True
+	if key in SALES_DASHBOARD_MODULE_KEYS and "sales" in allowed:
+		return True
+	parent = OPERATIONS_DASHBOARD_ACCESS_PARENT.get(key)
+	return bool(parent and parent in allowed)
+
+
 def require_module_access(
 	module_key: str,
 	user: Optional[str] = None,
@@ -207,6 +223,8 @@ def require_module_access(
 
 	allowed = _allowed_module_keys_for_access(user, company)
 	if allowed is not None and key not in allowed:
+		if _dashboard_module_allowed(key, allowed):
+			return
 		frappe.throw(
 			_("Module {0} is not permitted by your Access Profile").format(key),
 			frappe.PermissionError,
@@ -320,5 +338,8 @@ def _allowed_module_keys_for_access(user: str, company: Optional[str]) -> Option
 	for shell in ("push", "settings"):
 		allowed_modules.add(shell)
 	if "sales" in allowed_modules:
-		allowed_modules.add("sales_overview")
+		allowed_modules.update(SALES_DASHBOARD_MODULE_KEYS)
+	for dash_key, parent in OPERATIONS_DASHBOARD_ACCESS_PARENT.items():
+		if parent in allowed_modules:
+			allowed_modules.add(dash_key)
 	return allowed_modules

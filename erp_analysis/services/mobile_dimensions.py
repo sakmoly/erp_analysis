@@ -49,7 +49,6 @@ def validate_dimension_definition(row: Any) -> None:
 	"""Validate a Mobile Analysis Dimension row before save."""
 	source_mode = (getattr(row, "source_mode", None) or "FIELD").strip().upper()
 	if source_mode in ("DERIVED", "RELATION"):
-		# Join paths validated in a later phase; require JSON when mode is set.
 		if not (getattr(row, "join_path_json", None) or "").strip():
 			frappe.throw(
 				_("Join Path JSON is required for source mode {0}").format(source_mode)

@@ -34,6 +34,12 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	("erp_analysis.receivables.get_receivables_performance", "Receivables Performance"),
 	("erp_analysis.receivables.get_receivables_trends", "Receivables Trends"),
 	("erp_analysis.receivables.get_receivables_dashboard", "Receivables Dashboard"),
+	("erp_analysis.receivables.get_receivables_aging_chart", "Receivables Aging Chart"),
+	("erp_analysis.receivables.get_receivables_territory_chart", "Receivables Territory Chart"),
+	("erp_analysis.receivables.get_receivables_top_customers_chart", "Receivables Top Customers Chart"),
+	("erp_analysis.receivables.get_receivables_overdue_customers_chart", "Receivables Overdue Customers Chart"),
+	("erp_analysis.receivables.get_receivables_overdue_trend_chart", "Receivables Overdue Trend Chart"),
+	("erp_analysis.receivables.get_receivables_attention", "Receivables Attention"),
 	("erp_analysis.receivables.get_territory_receivables", "Receivables by Territory"),
 	("erp_analysis.receivables.get_customer_statement", "Customer Statement"),
 	# Inventory

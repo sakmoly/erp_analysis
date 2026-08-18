@@ -313,6 +313,221 @@ def get_receivables_dashboard(company: Optional[str] = None,
         "territory_totals": territory_totals,
     }
 
+
+_RECV_AGING_LABELS = {
+    "current": "Current",
+    "d30": "1-30 Days",
+    "d60": "31-60 Days",
+    "d90": "61-90 Days",
+    "d120p": "91-120 Days",
+    "old_balance": "Over 120 Days",
+}
+
+
+def _recv_chart_point(label: str, value: float) -> dict:
+    text = str(label)
+    amount = round(float(value or 0), 2)
+    return {"label": text, "value": amount, "dimension_value": text}
+
+
+def _recv_aging_series(buckets_total: dict) -> list[dict]:
+    series: list[dict] = []
+    total = sum(float(buckets_total.get(key) or 0) for key in _RECV_AGING_LABELS)
+    for key in _RECV_AGING_LABELS:
+        amount = float(buckets_total.get(key) or 0)
+        if amount <= 0:
+            continue
+        point = _recv_chart_point(_RECV_AGING_LABELS[key], amount)
+        if total > 0:
+            point["percentage"] = round(amount / total * 100, 1)
+            point["pct"] = point["percentage"]
+        series.append(point)
+    return series
+
+
+def _recv_territory_series(territory_totals: list) -> list[dict]:
+    rows = sorted(
+        (r for r in (territory_totals or []) if isinstance(r, dict)),
+        key=lambda r: float(r.get("outstanding") or 0),
+        reverse=True,
+    )
+    return [
+        _recv_chart_point(r.get("territory") or "Unassigned", r.get("outstanding") or 0)
+        for r in rows
+        if float(r.get("outstanding") or 0) > 0
+    ]
+
+
+def _recv_top_customer_series(rows: list, *, limit: int = 10) -> list[dict]:
+    ranked = sorted(
+        (r for r in (rows or []) if isinstance(r, dict)),
+        key=lambda r: float(r.get("outstanding_amount") or 0),
+        reverse=True,
+    )
+    series: list[dict] = []
+    for row in ranked[: int(limit or 10)]:
+        amount = float(row.get("outstanding_amount") or 0)
+        if amount <= 0:
+            continue
+        series.append(_recv_chart_point(row.get("customer_name") or row.get("customer") or "Unknown", amount))
+    return series
+
+
+def _recv_overdue_customer_series(rows: list, *, limit: int = 10) -> list[dict]:
+    ranked: list[tuple[float, dict]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        overdue = sum(float(row.get(field) or 0) for field in ("d30", "d60", "d90", "d120p", "old_balance"))
+        if overdue <= 0:
+            continue
+        ranked.append((overdue, row))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    out: list[dict] = []
+    for amount, row in ranked[: int(limit or 10)]:
+        label = row.get("customer_name") or row.get("customer") or "Unknown"
+        point = _recv_chart_point(label, amount)
+        days = int(row.get("avg_age_days") or 0)
+        if days > 0:
+            point["days"] = days
+            point["days_overdue"] = days
+        out.append(point)
+    return out
+
+
+def _recv_chart_payload(company: Optional[str], chart_key: str, *, limit: int = 10) -> dict:
+    dash = get_receivables_dashboard(company=company)
+    if chart_key == "aging":
+        series = _recv_aging_series(dash.get("buckets_total") or {})
+        dimension = "aging_bucket"
+    elif chart_key == "territory":
+        series = _recv_territory_series(dash.get("territory_totals") or [])
+        dimension = "territory"
+    elif chart_key == "top_customers":
+        series = _recv_top_customer_series(dash.get("rows") or [], limit=limit)
+        dimension = "customer"
+    elif chart_key == "overdue_customers":
+        series = _recv_overdue_customer_series(dash.get("rows") or [], limit=limit)
+        dimension = "customer"
+    else:
+        frappe.throw(f"Unsupported receivables chart: {chart_key}")
+
+    return {
+        "series": series,
+        "meta": {
+            "schema_version": 1,
+            "chart_key": chart_key,
+            "dimension": dimension,
+            "count": len(series),
+        },
+    }
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_receivables_aging_chart(company: Optional[str] = None):
+    company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+    return _recv_chart_payload(company, "aging")
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_receivables_territory_chart(company: Optional[str] = None):
+    company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+    return _recv_chart_payload(company, "territory")
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_receivables_top_customers_chart(company: Optional[str] = None, limit: Optional[int] = None):
+    company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+    limit = _to_int(_get_arg("limit", limit), 10)
+    return _recv_chart_payload(company, "top_customers", limit=limit)
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_receivables_overdue_customers_chart(company: Optional[str] = None, limit: Optional[int] = None):
+    company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+    limit = _to_int(_get_arg("limit", limit), 10)
+    return _recv_chart_payload(company, "overdue_customers", limit=limit)
+
+
+def _recv_overdue_trend_series(company: Optional[str], months: int = 6) -> list[dict]:
+    scope = resolve_territory_scope(company=company, module="receivables")
+    terr_sql, terr_params = si_territory_sql(scope, field="territory")
+
+    current_rows = frappe.db.sql(
+        f"""
+        SELECT DATE_FORMAT(due_date, '%%b') AS month_label,
+               YEAR(due_date) AS yr,
+               MONTH(due_date) AS mo,
+               SUM(outstanding_amount) AS overdue
+        FROM `tabSales Invoice`
+        WHERE docstatus = 1 AND outstanding_amount > 0
+          AND due_date < CURDATE()
+          AND due_date >= DATE_SUB(CURDATE(), INTERVAL %s MONTH)
+          AND company = %s
+          {terr_sql}
+        GROUP BY YEAR(due_date), MONTH(due_date)
+        ORDER BY YEAR(due_date), MONTH(due_date)
+        """,
+        (months, company) + tuple(terr_params),
+        as_dict=True,
+    )
+    ly_rows = frappe.db.sql(
+        f"""
+        SELECT DATE_FORMAT(due_date, '%%b') AS month_label,
+               YEAR(due_date) AS yr,
+               MONTH(due_date) AS mo,
+               SUM(outstanding_amount) AS overdue
+        FROM `tabSales Invoice`
+        WHERE docstatus = 1 AND outstanding_amount > 0
+          AND due_date < DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
+          AND due_date >= DATE_SUB(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), INTERVAL %s MONTH)
+          AND company = %s
+          {terr_sql}
+        GROUP BY YEAR(due_date), MONTH(due_date)
+        ORDER BY YEAR(due_date), MONTH(due_date)
+        """,
+        (months, company) + tuple(terr_params),
+        as_dict=True,
+    )
+    ly_map = {r.month_label: float(r.overdue or 0) for r in ly_rows}
+    series: list[dict] = []
+    for row in current_rows:
+        label = row.month_label
+        value = float(row.overdue or 0)
+        point = {"label": label, "value": round(value, 2), "dimension_value": label, "period": label}
+        ly_val = ly_map.get(label)
+        if ly_val is not None:
+            point["value_ly"] = round(ly_val, 2)
+        series.append(point)
+    return series
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_receivables_overdue_trend_chart(company: Optional[str] = None, months: Optional[int] = None):
+    company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+    months = _to_int(_get_arg("months", months), 6)
+    series = _recv_overdue_trend_series(company, months=months)
+    return {
+        "series": series,
+        "meta": {
+            "schema_version": 1,
+            "chart_key": "receivables_overdue_trend",
+            "dimension": "month",
+            "compare": "ly",
+            "count": len(series),
+        },
+    }
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_receivables_attention(company: Optional[str] = None, limit: Optional[int] = None):
+    company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+    limit = _to_int(_get_arg("limit", limit), 10)
+    from erp_analysis.services.receivables_attention import get_receivables_attention_items
+
+    return get_receivables_attention_items(company=company, limit=limit)
+
+
 # -------- 2) Receivables Snapshot (KPIs only) --------
 
 @frappe.whitelist(methods=["GET", "POST"], allow_guest=False)

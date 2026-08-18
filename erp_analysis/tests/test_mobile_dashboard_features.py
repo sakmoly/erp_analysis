@@ -18,7 +18,7 @@ class TestMobileWidgetsExtended(FrappeTestCase):
 				"action": {
 					"type": "navigate",
 					"target": "dashboard",
-					"dashboard_id": "receivables_home",
+					"dashboard_id": "receivables_overview",
 				}
 			},
 		}
@@ -97,7 +97,7 @@ class TestMobileDashboardBoards(FrappeTestCase):
 				"default_dashboard": "home",
 				"dashboards": [
 					{"dashboard_key": "home", "label": "Home", "enabled": 1, "sort_order": 0},
-					{"dashboard_key": "receivables_home", "label": "Receivables", "enabled": 1, "sort_order": 1},
+					{"dashboard_key": "receivables_overview", "label": "Receivables", "enabled": 1, "sort_order": 1},
 				],
 				"dashboard_widgets": [
 					{
@@ -111,7 +111,7 @@ class TestMobileDashboardBoards(FrappeTestCase):
 						"widget_key": "receivables_card",
 						"label": "Receivables",
 						"widget_type": "LIST",
-						"dashboard_id": "receivables_home",
+						"dashboard_id": "receivables_overview",
 						"enabled": 1,
 					},
 				],
