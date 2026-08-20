@@ -167,13 +167,29 @@ def _bootstrap_layout_config(raw: Any) -> dict[str, Any]:
 
 
 def sanitize_widget_for_bootstrap(widget: dict[str, Any]) -> dict[str, Any]:
-	"""Strip server-only config before mobile bootstrap (batch API keeps full config server-side)."""
+	"""Strip server-only config and normalize fields for mobile bootstrap."""
 	out = dict(widget)
 	raw_config = out.get("config_json")
-	if raw_config:
-		safe = _bootstrap_layout_config(raw_config)
+	config = out.get("config") or {}
+	if raw_config and not config:
+		config = _bootstrap_layout_config(raw_config)
+	if raw_config or config:
+		safe = _bootstrap_layout_config(config or raw_config)
 		out["config"] = safe
 		out["config_json"] = json.dumps(safe) if safe else None
+		config = safe
+
+	widget_type = (out.get("widget_type") or out.get("type") or "LIST").upper()
+	out["widget_type"] = widget_type
+	out["type"] = widget_type
+
+	for field in ("section_title", "row_group", "kpi_id", "layout", "columns", "render_hint", "format"):
+		if config.get(field) is not None and out.get(field) is None:
+			out[field] = config[field]
+
+	if out.get("show_ly") is None and config.get("compare") == "ly":
+		out["show_ly"] = True
+
 	return out
 
 

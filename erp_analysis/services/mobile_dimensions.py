@@ -44,6 +44,17 @@ FORBIDDEN_FIELD_TYPES = frozenset(
 	}
 )
 
+ALLOWED_HIDDEN_DIMENSION_FIELDS = frozenset(
+	{
+		"customer_group",
+		"territory",
+		"company",
+		"cost_center",
+		"project",
+		"branch",
+	}
+)
+
 
 def validate_dimension_definition(row: Any) -> None:
 	"""Validate a Mobile Analysis Dimension row before save."""
@@ -72,7 +83,8 @@ def validate_dimension_definition(row: Any) -> None:
 		frappe.throw(_("Field type {0} is not allowed for dimensions").format(df.fieldtype))
 
 	if getattr(df, "hidden", 0) and not getattr(df, "in_list_view", 0):
-		frappe.throw(_("Hidden/internal field {0} cannot be used as a dimension").format(source_field))
+		if source_field not in ALLOWED_HIDDEN_DIMENSION_FIELDS and df.fieldtype not in ("Link", "Select", "Data"):
+			frappe.throw(_("Hidden/internal field {0} cannot be used as a dimension").format(source_field))
 
 
 def get_profile_dimensions(profile_name: str, *, enabled_only: bool = True) -> list[dict[str, Any]]:

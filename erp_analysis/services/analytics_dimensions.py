@@ -50,6 +50,7 @@ def _legacy_dimension_specs() -> dict[str, dict[str, Any]]:
 
 	add("company", "Company", "Sales Invoice", "company")
 	add("territory", "Territory", "Sales Invoice", "territory")
+	add("customer_group", "Customer Group", "Sales Invoice", "customer_group")
 	add("brand", "Brand", "Sales Invoice Item", "brand")
 	add("warehouse", "Warehouse", "Sales Invoice", _first_field("Sales Invoice", ("set_warehouse", "warehouse")) or "")
 	if "warehouse" not in specs:
@@ -65,6 +66,67 @@ def _legacy_dimension_specs() -> dict[str, dict[str, Any]]:
 	add("branch", "Branch", "Sales Invoice", branch or "")
 
 	return {k: v for k, v in specs.items() if v.get("source_field")}
+
+
+DIMENSION_KEY_ALIASES = {
+	"channel": "division",
+}
+
+
+def _dashboard_join_path(
+	table: str,
+	group_field: str,
+	*,
+	min_metric: float = 0,
+) -> str:
+	return json.dumps(
+		{
+			"table": table,
+			"date_field": "Invoice_Date",
+			"metric_field": "Net_Amount",
+			"group_field": group_field,
+			"territory_field": "Territory",
+			"min_metric": min_metric,
+		},
+		separators=(",", ":"),
+	)
+
+
+def _legacy_dashboard_dimension_specs() -> dict[str, dict[str, Any]]:
+	"""Printechs SalesDashBoard logical keys when the table exists."""
+	if not frappe.db.table_exists("SalesDashBoard"):
+		return {}
+
+	specs: dict[str, dict[str, Any]] = {}
+	for key, label, field in (
+		("salesperson", "Salesperson", "Sales_Person"),
+		("division", "Division", "Division"),
+	):
+		specs[key] = {
+			"dimension_key": key,
+			"label": label,
+			"enabled": 1,
+			"source_mode": "DERIVED",
+			"join_path_json": _dashboard_join_path("SalesDashBoard", field),
+			"allow_filter": 1,
+			"allow_group_by": 1,
+			"allow_sort": 0,
+		}
+	return specs
+
+
+def _parse_join_path(raw: Any) -> dict[str, Any]:
+	if not raw:
+		return {}
+	if isinstance(raw, dict):
+		return raw
+	if isinstance(raw, str):
+		try:
+			parsed = json.loads(raw)
+			return parsed if isinstance(parsed, dict) else {}
+		except Exception:
+			return {}
+	return {}
 
 
 def list_effective_dimensions(user: str, company: Optional[str] = None) -> list[dict[str, Any]]:
@@ -96,25 +158,57 @@ def resolve_effective_dimension(
 	key = (dimension_key or "").strip().lower()
 	if not key:
 		frappe.throw(_("Dimension is required"), frappe.ValidationError)
+	key = DIMENSION_KEY_ALIASES.get(key, key)
 
 	profile_name = resolve_mobile_app_profile_name(user=user, company=company)
 	if profile_name:
 		row = resolve_dimension(profile_name, key)
-		if not row:
-			frappe.throw(_("Unknown or disabled dimension: {0}").format(dimension_key), frappe.ValidationError)
-		return _normalize_analysis_row(row)
+		if row:
+			return _normalize_analysis_row(row)
 
 	config = get_mobile_config_cached()
+	legacy_specs = {**_legacy_dimension_specs(), **_legacy_dashboard_dimension_specs()}
+	if profile_name:
+		spec = legacy_specs.get(key)
+		if spec:
+			return _normalize_analysis_row(spec)
+		frappe.throw(_("Unknown or disabled dimension: {0}").format(dimension_key), frappe.ValidationError)
+
 	if not (config.get("dimensions") or {}).get(key, False):
 		frappe.throw(_("Unknown or disabled dimension: {0}").format(dimension_key), frappe.ValidationError)
 
-	spec = _legacy_dimension_specs().get(key)
+	spec = legacy_specs.get(key)
 	if not spec:
 		frappe.throw(_("Dimension {0} is not configured on this site").format(dimension_key), frappe.ValidationError)
 	return _normalize_analysis_row(spec)
 
 
+def _normalize_dashboard_dimension_row(row: dict[str, Any], join_path: dict[str, Any]) -> dict[str, Any]:
+	table = (join_path.get("table") or "").strip()
+	group_field = (join_path.get("group_field") or "").strip()
+	if table != "SalesDashBoard" or not group_field:
+		frappe.throw(_("Invalid dashboard dimension configuration for {0}").format(row.get("dimension_key")))
+	if not frappe.db.table_exists("SalesDashBoard"):
+		frappe.throw(_("Sales dashboard table is not available on this site"))
+	cols = {c["Field"] for c in frappe.db.sql("SHOW COLUMNS FROM `tabSalesDashBoard`", as_dict=True)}
+	if group_field not in cols:
+		frappe.throw(_("Dimension field missing on site: {0}").format(row.get("dimension_key")))
+	out = dict(row)
+	out["analysis_source"] = "dashboard"
+	out["dashboard_table"] = table
+	out["analysis_field"] = group_field
+	out["join_path"] = join_path
+	return out
+
+
 def _normalize_analysis_row(row: dict[str, Any]) -> dict[str, Any]:
+	source_mode = (row.get("source_mode") or "FIELD").strip().upper()
+	if source_mode in ("DERIVED", "RELATION"):
+		join_path = _parse_join_path(row.get("join_path_json"))
+		if join_path.get("table") == "SalesDashBoard":
+			return _normalize_dashboard_dimension_row(row, join_path)
+		frappe.throw(_("Invalid dimension configuration for {0}").format(row.get("dimension_key")))
+
 	analysis_doctype = row.get("analysis_doctype") or row.get("source_doctype")
 	analysis_field = row.get("analysis_field") or row.get("source_field")
 	if not analysis_doctype or not analysis_field:
@@ -124,6 +218,7 @@ def _normalize_analysis_row(row: dict[str, Any]) -> dict[str, Any]:
 	out = dict(row)
 	out["analysis_doctype"] = analysis_doctype
 	out["analysis_field"] = analysis_field
+	out["analysis_source"] = "sales_invoice"
 	out["sql_alias"] = "si" if analysis_doctype == "Sales Invoice" else "sii"
 	return out
 

@@ -30,12 +30,13 @@ from erp_analysis.services.mobile_profile import (
 	sanitize_widget_for_bootstrap,
 )
 
-BOOTSTRAP_SCHEMA_VERSION = 1
+BOOTSTRAP_SCHEMA_VERSION = 5
 
 # Ops dashboard boards — embed batch widget payloads in bootstrap (mobile merge fallback).
 _BOOTSTRAP_HYDRATED_BOARDS = frozenset(
 	{
 		"home",
+		"sales_overview",
 		"receivables_overview",
 		"inventory_overview",
 		"collection_overview",
@@ -329,7 +330,9 @@ def _hydrate_dashboard_boards_with_data(
 				user=user,
 				company=company,
 				dashboard_id=board_key,
-				use_cache=True,
+				use_cache=False,
+				refresh=True,
+				limit=10,
 			)
 			widgets_by_key = batch.get("widgets") or {}
 			board_data[board_key] = {
@@ -346,14 +349,13 @@ def _hydrate_dashboard_boards_with_data(
 			payload = widgets_by_key.get(key) or {}
 			if not payload:
 				cfg = meta.get("config") or {}
-				for alias in (cfg.get("chart_key"), cfg.get("kpi_id")):
+				for alias in (cfg.get("kpi_id"), key):
 					alias_key = (alias or "").strip()
 					if alias_key and alias_key in widgets_by_key:
 						payload = widgets_by_key[alias_key]
 						break
-			hydrated_widgets.append(
-				sanitize_widget_for_bootstrap({**meta, **payload} if payload else dict(meta))
-			)
+			merged = {**meta, **payload} if payload else dict(meta)
+			hydrated_widgets.append(sanitize_widget_for_bootstrap(merged))
 
 		hydrated_boards.append({**board, "widgets": hydrated_widgets})
 

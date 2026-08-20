@@ -301,6 +301,16 @@ def get_receivables_dashboard(company: Optional[str] = None,
         }
         for t, v in terr_map.items()
     ]
+    territory_cards = [
+        {
+            "territory": row["territory"],
+            "label": row["territory"],
+            "value": row["outstanding"],
+            "totalUnpaid": row["outstanding"],
+            "outstanding": row["outstanding"],
+        }
+        for row in territory_totals
+    ]
 
     return {
         "kpis": {
@@ -311,6 +321,8 @@ def get_receivables_dashboard(company: Optional[str] = None,
         "buckets_total": buckets_total,
         "rows": rows,
         "territory_totals": territory_totals,
+        "territory_cards": territory_cards,
+        "series": _recv_territory_series(territory_totals),
     }
 
 
@@ -346,16 +358,24 @@ def _recv_aging_series(buckets_total: dict) -> list[dict]:
 
 
 def _recv_territory_series(territory_totals: list) -> list[dict]:
+    seen: set[str] = set()
     rows = sorted(
         (r for r in (territory_totals or []) if isinstance(r, dict)),
         key=lambda r: float(r.get("outstanding") or 0),
         reverse=True,
     )
-    return [
-        _recv_chart_point(r.get("territory") or "Unassigned", r.get("outstanding") or 0)
-        for r in rows
-        if float(r.get("outstanding") or 0) > 0
-    ]
+    series: list[dict] = []
+    for row in rows:
+        territory = str(row.get("territory") or "Unassigned").strip()
+        key = territory.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        amount = float(row.get("outstanding") or 0)
+        if amount <= 0:
+            continue
+        series.append(_recv_chart_point(territory, amount))
+    return series
 
 
 def _recv_top_customer_series(rows: list, *, limit: int = 10) -> list[dict]:

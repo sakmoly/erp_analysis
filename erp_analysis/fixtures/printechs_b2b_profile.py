@@ -8,7 +8,7 @@ import frappe
 
 from erp_analysis.mobile_config import default_modules
 from erp_analysis.mobile_module_icons import DEFAULT_MODULE_ICON_KEYS
-from erp_analysis.services.analytics_dimensions import _legacy_dimension_specs
+from erp_analysis.services.analytics_dimensions import _dashboard_join_path, _legacy_dimension_specs
 from erp_analysis.services.mobile_dimensions import validate_dimension_definition
 from erp_analysis.utils.schema import has_field
 
@@ -54,11 +54,9 @@ def _module_rows() -> list[dict[str, Any]]:
 
 def _dimension_rows() -> list[dict[str, Any]]:
 	"""Only dimensions with valid fields on this site."""
-	specs = _legacy_dimension_specs()
+	specs = {**_legacy_dimension_specs(), **_legacy_dashboard_specs()}
 	extra = {
 		"customer": ("Customer", "Customer", "territory"),
-		"customer_group": ("Customer Group", "Customer Group", "name"),
-		"salesperson": ("Sales Person", "Sales Person", "name"),
 		"item_group": ("Item Group", "Item Group", "name"),
 	}
 	for key, (label, doctype, field) in extra.items():
@@ -77,15 +75,16 @@ def _dimension_rows() -> list[dict[str, Any]]:
 
 	rows: list[dict[str, Any]] = []
 	for idx, (key, spec) in enumerate(sorted(specs.items())):
-		if not spec.get("source_field"):
+		if spec.get("source_mode", "FIELD") == "FIELD" and not spec.get("source_field"):
 			continue
 		row = {
 			"dimension_key": key,
 			"label": spec.get("label") or key.replace("_", " ").title(),
 			"enabled": 1,
-			"source_doctype": spec["source_doctype"],
-			"source_field": spec["source_field"],
-			"source_mode": "FIELD",
+			"source_doctype": spec.get("source_doctype"),
+			"source_field": spec.get("source_field"),
+			"source_mode": spec.get("source_mode") or "FIELD",
+			"join_path_json": spec.get("join_path_json"),
 			"allow_filter": 1,
 			"allow_group_by": 1,
 			"allow_sort": 0,
@@ -97,6 +96,27 @@ def _dimension_rows() -> list[dict[str, Any]]:
 		except Exception:
 			continue
 	return rows
+
+
+def _legacy_dashboard_specs() -> dict[str, dict[str, Any]]:
+	if not frappe.db.table_exists("SalesDashBoard"):
+		return {}
+	return {
+		"salesperson": {
+			"dimension_key": "salesperson",
+			"label": "Salesperson",
+			"enabled": 1,
+			"source_mode": "DERIVED",
+			"join_path_json": _dashboard_join_path("SalesDashBoard", "Sales_Person"),
+		},
+		"division": {
+			"dimension_key": "division",
+			"label": "Division",
+			"enabled": 1,
+			"source_mode": "DERIVED",
+			"join_path_json": _dashboard_join_path("SalesDashBoard", "Division"),
+		},
+	}
 
 
 def build_profile_doc_dict(company: Optional[str] = None) -> dict[str, Any]:

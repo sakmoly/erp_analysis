@@ -10,7 +10,7 @@ from frappe import _
 from erp_analysis.services.kpi.collection import get_collection_period_kpis
 from erp_analysis.services.kpi.inventory_summary import get_inventory_summary_kpis
 from erp_analysis.services.kpi.receivables_summary import get_receivables_summary_kpis
-from erp_analysis.services.purchase import get_purchase_summary
+from erp_analysis.services.kpi.home_metrics import _total_purchases_kpi
 from erp_analysis.services.sales_orders import get_order_book_summary
 
 
@@ -51,7 +51,18 @@ COLLECTION_KPI_METRICS = frozenset(
 	}
 )
 
-PURCHASE_KPI_METRICS = frozenset({"open_po_value", "pending_receipt", "open_po_count", "pending_receipt_count"})
+PAYABLES_KPI_METRICS = frozenset({"total_payable", "total_payables", "overdue_payable", "payables_overdue"})
+
+PURCHASE_KPI_METRICS = frozenset(
+	{
+		"open_po_value",
+		"pending_receipt",
+		"open_po_count",
+		"pending_receipt_count",
+		"total_purchases",
+		"purchases_ytd",
+	}
+)
 
 SALES_ORDERS_KPI_METRICS = frozenset(
 	{"open_so_value", "pending_delivery", "open_so_count", "pending_delivery_count"}
@@ -69,8 +80,10 @@ def is_module_kpi(module_key: str, metric_key: str) -> bool:
 		return metric in INVENTORY_KPI_METRICS
 	if module == "collection":
 		return metric in COLLECTION_KPI_METRICS
-	if module == "purchase":
+	if module in ("purchase", "purchasing", "purchases"):
 		return metric in PURCHASE_KPI_METRICS
+	if module in ("payables", "payable", "ap"):
+		return metric in PAYABLES_KPI_METRICS
 	if module in ("sales_orders", "sales_order"):
 		return metric in SALES_ORDERS_KPI_METRICS
 	return False
@@ -94,8 +107,10 @@ def get_module_kpi(
 		return _inventory_kpi(company, metric)
 	if module == "collection":
 		return _collection_kpi(company, metric, period_key)
-	if module == "purchase":
-		return _purchase_kpi(company, metric)
+	if module in ("purchase", "purchasing", "purchases"):
+		return _purchase_kpi(company, metric, period_key)
+	if module in ("payables", "payable", "ap"):
+		return _payables_kpi(company, metric)
 	if module in ("sales_orders", "sales_order"):
 		return _sales_orders_kpi(company, metric)
 
@@ -226,7 +241,20 @@ def _receivables_performance(company: Optional[str]) -> dict[str, Any]:
 	return get_receivables_performance(company=company, limit=5) or {}
 
 
-def _purchase_kpi(company: Optional[str], metric: str) -> dict[str, Any]:
+def _payables_kpi(company: Optional[str], metric: str) -> dict[str, Any]:
+	kpis = get_payables_summary(company=company)
+	total = float(kpis.get("total") or 0)
+	overdue = float(kpis.get("overdue") or 0)
+	if metric in ("total_payable", "total_payables"):
+		return _kpi_result(metric=metric, label="Total Payables", value=total)
+	if metric in ("overdue_payable", "payables_overdue"):
+		return _kpi_result(metric=metric, label="Overdue Payables", value=overdue)
+	frappe.throw(_("Unsupported payables metric: {0}").format(metric), frappe.ValidationError)
+
+
+def _purchase_kpi(company: Optional[str], metric: str, period: str = "mtd") -> dict[str, Any]:
+	if metric in ("total_purchases", "purchases_ytd"):
+		return _total_purchases_kpi(company=company, period=period, compare=None, from_date=None, to_date=None)
 	kpis = get_purchase_summary(company=company)
 	if metric in ("open_po_value", "open_value"):
 		return _kpi_result(metric=metric, label="Open PO Value", value=kpis.get("open_value") or 0)

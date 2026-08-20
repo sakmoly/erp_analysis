@@ -26,6 +26,140 @@ LEGACY_WIDGET_TYPES = frozenset({"LIST", "MATRIX"})
 NAV_WIDGET_TYPES = frozenset({"LINK"})
 
 BOARD_DATA_CACHE_TTL = 180
+BOARD_DATA_CACHE_VERSION = 11
+
+
+def _effective_widget_row_limit(widget: dict[str, Any], limit: int) -> int:
+	"""Profile row_limit wins over request limit (e.g. salesperson top 10)."""
+	config = widget.get("config") or {}
+	defaults = WIDGET_DEFAULTS.get(widget.get("key") or "", {})
+	default_limit = (defaults.get("config") or {}).get("row_limit")
+	configured = config.get("row_limit", default_limit)
+	if configured is not None and str(configured).strip() != "":
+		return max(int(configured), int(limit or 0))
+	return int(limit or 10)
+
+# Optional lookup aliases (mobile may request batch data by alias or kpi_id).
+WIDGET_KEY_ALIASES: dict[str, str] = {
+	"sales_by_channel": "sales_by_division",
+	"sales_donut_channel": "sales_donut_division",
+	"channel_ranking": "sales_by_division",
+	"sales_channel_ranking": "sales_by_division",
+	"sales_by_channel_pie": "sales_donut_division",
+	"channel_donut": "sales_donut_division",
+}
+
+RANKING_WIDGET_ALIASES: dict[str, list[str]] = {
+	"sales_by_salesperson": ["top_salespersons", "salesperson_ranking"],
+	"sales_by_territory": ["sales_dash_territory", "territory_ranking"],
+	"sales_by_customer_group": ["customer_group_ranking"],
+	"sales_by_division": ["sales_by_channel", "channel_ranking", "sales_channel_ranking"],
+}
+
+DONUT_WIDGET_ALIASES: dict[str, list[str]] = {
+	"sales_donut_customer_group": ["sales_by_customer_group_pie"],
+	"sales_donut_division": ["sales_donut_channel", "sales_by_channel_pie", "channel_donut"],
+}
+KPI_WIDGET_ALIASES: dict[str, list[str]] = {
+	"home_total_sales_kpi": ["total_sales_kpi", "sales_ytd_kpi", "net_sales_kpi"],
+	"home_total_receivables_kpi": ["total_receivables_kpi", "receivables_total_kpi"],
+	"home_total_inventory_kpi": ["total_inventory_kpi", "inventory_value_kpi"],
+	"home_total_purchases_kpi": ["total_purchases_kpi", "purchases_ytd_kpi"],
+	"home_total_payables_kpi": ["total_payables_kpi", "payables_total_kpi"],
+	"home_gross_profit_kpi": ["gross_profit_kpi", "gp_ytd_kpi"],
+	"home_gp_margin_kpi": ["gp_margin_kpi", "gross_profit_margin_kpi"],
+	"home_current_ratio_kpi": ["current_ratio_kpi"],
+	"home_operating_cash_flow_kpi": ["operating_cash_flow_kpi", "cash_flow_kpi"],
+	"home_net_profit_kpi": ["net_profit_kpi"],
+	"home_sales_health": ["sales_performance_health", "sales_health_score"],
+	"home_receivables_health": ["receivables_health_score"],
+	"home_inventory_health": ["inventory_health_score"],
+	"home_payables_health": ["payables_health_score"],
+	"sales_total_kpi": ["sales_dash_net_ytd_kpi", "net_sales_kpi"],
+	"sales_cogs_kpi": ["cogs_kpi", "cost_of_goods_sold_kpi"],
+	"sales_gp_kpi": ["gross_profit_kpi", "sales_gross_profit_kpi"],
+	"sales_gp_margin_kpi": ["gross_profit_margin_kpi", "gp_margin_kpi"],
+	"sales_active_customers_kpi": ["active_customers_kpi", "customer_count_kpi"],
+	"sales_returns_kpi": ["returns_kpi", "sales_return_kpi"],
+}
+
+CHART_WIDGET_ALIASES: dict[str, list[str]] = {
+	"sales_trend_line": ["sales_overview_trend", "sales_trend_chart"],
+}
+
+
+def _register_receivables_territory_aliases(widgets_out: dict[str, Any], payload: dict[str, Any]) -> None:
+	"""Register one slim KPI payload per territory for mobile batch lookup."""
+	for kpi in payload.get("kpis") or []:
+		if not isinstance(kpi, dict):
+			continue
+		kpi_id = str(kpi.get("kpi_id") or kpi.get("label") or "").strip()
+		if not kpi_id:
+			continue
+		value = kpi.get("value")
+		widgets_out[kpi_id] = {
+			**payload,
+			"widget_key": payload.get("widget_key"),
+			"widget_type": "KPI",
+			"label": kpi_id,
+			"kpis": [kpi],
+			"kpi": {
+				**kpi,
+				"show_currency_symbol": True,
+			},
+			"value": value,
+			"data": {
+				"value": value,
+				"kpi_id": kpi_id,
+				"format": kpi.get("format") or "currency_compact",
+			},
+		}
+
+
+def _register_widget_payload_aliases(
+	widgets_out: dict[str, Any],
+	widget: dict[str, Any],
+	payload: dict[str, Any],
+) -> None:
+	"""Duplicate KPI payloads under kpi_id / alias keys for mobile lookup."""
+	key = widget["key"]
+	widgets_out[key] = payload
+	config = widget.get("config") or {}
+
+	if payload.get("widget_type") == "KPI":
+		kpi_id = (config.get("kpi_id") or payload.get("kpi", {}).get("kpi_id") or key).strip()
+		if kpi_id:
+			widgets_out[kpi_id] = payload
+		for alias in KPI_WIDGET_ALIASES.get(key, []):
+			alias_key = str(alias).strip()
+			if alias_key:
+				widgets_out[alias_key] = payload
+		return
+
+	for alias in CHART_WIDGET_ALIASES.get(key, []):
+		alias_key = str(alias).strip()
+		if alias_key:
+			widgets_out[alias_key] = payload
+
+	if payload.get("widget_type") == "RANKING":
+		for alias in RANKING_WIDGET_ALIASES.get(key, []):
+			alias_key = str(alias).strip()
+			if alias_key:
+				widgets_out[alias_key] = payload
+
+	if payload.get("widget_type") == "DONUT":
+		for alias in DONUT_WIDGET_ALIASES.get(key, []):
+			alias_key = str(alias).strip()
+			if alias_key:
+				widgets_out[alias_key] = payload
+
+	kpi_id = config.get("kpi_id")
+	if kpi_id and payload.get("widget_type") == "KPI":
+		widgets_out[str(kpi_id).strip()] = payload
+	chart_key = config.get("chart_key") or (payload.get("meta") or {}).get("chart_key")
+	if chart_key and payload.get("widget_type") in CHART_WIDGET_TYPES:
+		widgets_out[str(chart_key).strip()] = payload
+
 
 # Defaults when Desk row omits metric/dimension/legacy API mapping.
 WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -37,7 +171,18 @@ WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
 	},
 	"receivables_card": {
 		"module_key": "receivables",
+		"widget_type": "PIE",
+		"metric_key": "outstanding",
+		"dimension_key": "territory",
 		"legacy_method": "erp_analysis.receivables.get_receivables_dashboard",
+		"config": {
+			"payload_source": "legacy_chart",
+			"rows_key": "territory_totals",
+			"label_field": "territory",
+			"value_field": "outstanding",
+			"section_title": "Receivables Card",
+			"row_group": "receivables_card",
+		},
 	},
 	"inventory_card": {
 		"module_key": "inventory",
@@ -111,6 +256,42 @@ WIDGET_DEFAULTS: dict[str, dict[str, Any]] = {
 	"executive_dash_card": {
 		"module_key": "executive",
 		"legacy_method": "erp_analysis.executive.get_executive_dashboard",
+	},
+	"sales_by_salesperson": {
+		"module_key": "sales",
+		"metric_key": "net_sales",
+		"dimension_key": "salesperson",
+		"widget_type": "RANKING",
+		"period": "ytd",
+		"config": {
+			"compare": "ly",
+			"section_title": "Sales By",
+			"row_limit": 10,
+		},
+	},
+	"sales_by_territory": {
+		"module_key": "sales",
+		"metric_key": "net_sales",
+		"dimension_key": "territory",
+		"widget_type": "RANKING",
+		"period": "ytd",
+		"config": {
+			"compare": "ly",
+			"section_title": "Sales By",
+			"row_limit": 5,
+		},
+	},
+	"sales_management_attention": {
+		"module_key": "sales",
+		"widget_type": "LIST",
+		"period": "ytd",
+		"config": {
+			"data_source": "attention",
+			"section": "all",
+			"section_title": "Management Attention",
+			"format": "currency_compact",
+			"row_limit": 4,
+		},
 	},
 }
 
@@ -285,7 +466,9 @@ def resolve_widget_action(widget: dict[str, Any]) -> dict[str, Any]:
 
 def _merge_widget_definition(key: str, row: dict[str, Any]) -> dict[str, Any]:
 	defaults = dict(WIDGET_DEFAULTS.get(key, {}))
-	config = parse_widget_config_json(row.get("config_json")) or row.get("config") or {}
+	default_config = dict(defaults.get("config") or {})
+	row_config = parse_widget_config_json(row.get("config_json")) or row.get("config") or {}
+	config = {**default_config, **row_config}
 	return {
 		"key": key,
 		"label": row.get("label") or defaults.get("label") or key.replace("_", " ").title(),
@@ -314,6 +497,7 @@ def resolve_widget_definition(
 	key = (widget_key or "").strip()
 	if not key:
 		frappe.throw(_("widget_key is required"), frappe.ValidationError)
+	key = WIDGET_KEY_ALIASES.get(key, key)
 
 	profile_name = resolve_mobile_app_profile_name(user=user, company=company)
 	row: dict[str, Any] = {}
@@ -442,7 +626,7 @@ def get_dashboard_board_data(
 	effective_company = get_effective_company(user=user, requested=company, access=access)
 
 	cache_key = (
-		f"mobile_board_data:v1:{user}:{dashboard_id}:{effective_company or ''}:"
+		f"mobile_board_data:v{BOARD_DATA_CACHE_VERSION}:{user}:{dashboard_id}:{effective_company or ''}:"
 		f"{limit}:{from_date or ''}:{to_date or ''}:{profile_modified}"
 	)
 	if use_cache and not refresh:
@@ -452,6 +636,11 @@ def get_dashboard_board_data(
 
 	reset_batch_kpi_cache()
 	warm_batch_kpi_cache(user, effective_company, resolved_widgets)
+
+	show_ly = to_bool(kwargs.get("show_ly"), False)
+	batch_compare = kwargs.get("compare")
+	if batch_compare is None and show_ly:
+		batch_compare = "ly"
 
 	widgets_out: dict[str, Any] = {}
 	errors: dict[str, str] = {}
@@ -465,21 +654,17 @@ def get_dashboard_board_data(
 				from_date=from_date,
 				to_date=to_date,
 				limit=limit,
+				compare_override=batch_compare,
 			)
 			payload = dict(payload)
 			alias_keys = payload.pop("_alias_keys", None) or []
-			widgets_out[key] = payload
-			config = widget.get("config") or {}
-			kpi_id = config.get("kpi_id")
-			if kpi_id and payload.get("widget_type") == "KPI":
-				widgets_out[str(kpi_id).strip()] = payload
-			chart_key = config.get("chart_key") or (payload.get("meta") or {}).get("chart_key")
-			if chart_key and payload.get("widget_type") in CHART_WIDGET_TYPES:
-				widgets_out[str(chart_key).strip()] = payload
+			_register_widget_payload_aliases(widgets_out, widget, payload)
 			for alias in alias_keys:
 				alias_key = str(alias).strip()
 				if alias_key:
 					widgets_out[alias_key] = payload
+			if key == "receivables_card":
+				_register_receivables_territory_aliases(widgets_out, payload)
 		except Exception as exc:
 			errors[key] = str(exc)
 			frappe.log_error(title=f"dashboard_board.{key}", message=frappe.get_traceback())
@@ -526,6 +711,9 @@ def _build_widget_payload(
 		dimension_override=dimension_override,
 	)
 
+	if widget.get("key") == "receivables_card":
+		return _receivables_card_widget_payload(user, company, widget, limit)
+
 	if widget_type in NAV_WIDGET_TYPES:
 		return _link_widget_payload(widget)
 	if widget_type == "KPI":
@@ -569,6 +757,16 @@ def _build_widget_payload(
 		frappe.throw(
 			_("MATRIX widgets require secondary_dimension (not supported in v1 widget data API yet)"),
 			frappe.ValidationError,
+		)
+
+	config = widget.get("config") or {}
+	if _widget_data_source(config) == "attention":
+		return _attention_widget_payload(
+			user,
+			company,
+			widget,
+			limit,
+			compare_override=compare_override,
 		)
 
 	return _legacy_widget_payload(user, company, widget, from_date, to_date, limit, extra or {})
@@ -628,8 +826,10 @@ def _trend_widget_payload(
 
 	widget_type = widget["widget_type"]
 	hint = widget_type.lower() if widget_type in CHART_WIDGET_TYPES else "line"
+	comparison = trends.get("comparison") or {}
+	show_ly = bool(compare_mode or widget.get("show_ly") or config.get("compare") == "ly")
 
-	return {
+	payload: dict[str, Any] = {
 		"widget_key": widget["key"],
 		"widget_type": widget_type,
 		"label": widget.get("label"),
@@ -641,7 +841,7 @@ def _trend_widget_payload(
 			"compare": compare_mode,
 			"compare_label": _compare_column_label(compare_mode),
 			"show_currency_symbol": bool(show_currency),
-			"comparison": trends.get("comparison"),
+			"comparison": comparison,
 		},
 		"meta": {
 			"schema_version": 1,
@@ -650,6 +850,15 @@ def _trend_widget_payload(
 			"data_source": "trend",
 		},
 	}
+	if comparison:
+		payload["chart"]["summary"] = {
+			"value": comparison.get("value"),
+			"value_ly": comparison.get("value_ly"),
+			"change_pct": comparison.get("change_pct"),
+		}
+	if show_ly:
+		payload["show_ly"] = True
+	return payload
 
 
 def _customer_widget_payload(
@@ -744,6 +953,15 @@ def _customer_widget_payload(
 	}
 
 
+def _format_currency_compact(value: Any) -> str:
+	num = float(value or 0)
+	if abs(num) >= 1_000_000:
+		return f"{num / 1_000_000:.2f}M"
+	if abs(num) >= 1_000:
+		return f"{num / 1_000:.2f}K"
+	return f"{num:.2f}"
+
+
 def _attention_widget_payload(
 	user: str,
 	company: Optional[str],
@@ -758,7 +976,7 @@ def _attention_widget_payload(
 
 	from erp_analysis.services.sales_attention import get_sales_attention
 
-	result = get_sales_attention(
+	attention = get_sales_attention(
 		user=user,
 		company=company,
 		section=section,
@@ -769,7 +987,7 @@ def _attention_widget_payload(
 	)
 
 	rows = []
-	for alert in result.get("data") or []:
+	for alert in attention.get("data") or []:
 		rows.append(
 			{
 				"dimension": alert.get("title"),
@@ -779,6 +997,7 @@ def _attention_widget_payload(
 				"alert_type": alert.get("type"),
 				"description": alert.get("description"),
 				"entity_type": alert.get("entity_type"),
+				"change_pct": alert.get("change_pct"),
 				"reference_doctype": alert.get("reference_doctype"),
 				"reference_name": alert.get("reference_name"),
 				"drilldown": alert.get("drilldown"),
@@ -791,7 +1010,31 @@ def _attention_widget_payload(
 		{"key": "metric", "label": "Value", "format": "currency_compact", "flex": 1, "align": "right"},
 	]
 
-	return {
+	value_format = (config.get("format") or "currency_compact").strip().lower()
+	list_rows: list[dict[str, Any]] = []
+	for row in rows:
+		label = row.get("dimension") or row.get("dimension_value")
+		value = row.get("metric")
+		list_rows.append(
+			{
+				"label": label,
+				"value": value,
+				"format": value_format,
+				"value_display": _format_currency_compact(value),
+				"dimension": label,
+				"metric": value,
+				"meta": {
+					"severity": row.get("severity"),
+					"alert_type": row.get("alert_type"),
+					"change_pct": row.get("change_pct"),
+				},
+			}
+		)
+
+	is_list = widget["widget_type"] == "LIST"
+	render_hint = "cards" if is_list else ("ranking" if widget["widget_type"] == "RANKING" else "table")
+
+	payload: dict[str, Any] = {
 		"widget_key": widget["key"],
 		"widget_type": widget["widget_type"],
 		"label": widget.get("label"),
@@ -800,15 +1043,123 @@ def _attention_widget_payload(
 			"rows": rows,
 			"section": section,
 			"compare": None,
-			"show_currency_symbol": section not in ("sales_down",),
+			"show_currency_symbol": False,
+			"currency_display": {"show_symbol": False},
+		},
+		"rows": list_rows,
+		"data": {
+			"rows": list_rows,
+			"items": list_rows,
 		},
 		"meta": {
 			"schema_version": 1,
-			**(result.get("meta") or {}),
-			"render_hint": "ranking" if widget["widget_type"] == "RANKING" else "table",
+			**(attention.get("meta") or {}),
+			"render_hint": render_hint,
 			"data_source": "attention",
+			"format": value_format,
+			"value_format": value_format,
 		},
 	}
+	if config.get("section_title"):
+		payload["section_title"] = config.get("section_title")
+		payload["meta"]["section_title"] = config.get("section_title")
+	return payload
+
+
+def _resolve_kpi_module_key(widget: dict[str, Any], metric: str) -> str:
+	from erp_analysis.services.module_kpis import COLLECTION_KPI_METRICS
+
+	module_key = (widget.get("module_key") or "sales").strip().lower()
+	metric = (metric or "").strip().lower()
+	widget_key = (widget.get("key") or "").strip().lower()
+	if widget_key == "home_total_purchases_kpi" or metric in ("total_purchases", "purchases_ytd", "open_po_value"):
+		return "purchase"
+	if widget_key == "home_total_payables_kpi" or metric in ("total_payable", "total_payables"):
+		return "payables"
+	if metric in COLLECTION_KPI_METRICS:
+		return "collection"
+	return module_key
+
+
+def _is_health_gauge_widget(widget: dict[str, Any], config: dict[str, Any], metric: str) -> bool:
+	if (metric or "").strip().lower() == "health_score":
+		return True
+	render_hint = (config.get("render_hint") or "").strip().lower()
+	return render_hint == "gauge"
+
+
+def _build_kpi_widget_response(
+	widget: dict[str, Any],
+	kpi: dict[str, Any],
+	*,
+	format_hint: str,
+	show_currency: bool,
+	is_gauge: bool = False,
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	metric = (widget.get("metric_key") or "net_sales").strip().lower()
+	widget_key = (widget.get("key") or "").strip()
+	kpi_id = config.get("kpi_id") or widget_key or metric
+	value = kpi.get("value")
+	value_ly = kpi.get("value_ly")
+	change_pct = kpi.get("change_pct")
+	show_ly = bool(widget.get("show_ly") or config.get("compare") == "ly" or value_ly is not None)
+
+	kpi_entry: dict[str, Any] = {
+		"kpi_id": kpi_id,
+		"value": value,
+		"format": format_hint,
+	}
+	if value_ly is not None:
+		kpi_entry["previous"] = value_ly
+		kpi_entry["value_ly"] = value_ly
+	if change_pct is not None:
+		kpi_entry["change_pct"] = change_pct
+	if kpi.get("label") or widget.get("label"):
+		kpi_entry["label"] = kpi.get("label") or widget.get("label")
+
+	result: dict[str, Any] = {
+		"widget_key": widget_key,
+		"widget_type": "KPI",
+		"label": widget.get("label"),
+		"kpis": [kpi_entry],
+		"kpi": {
+			"kpi_id": kpi_id,
+			"value": value,
+			"value_ly": value_ly,
+			"change_pct": change_pct,
+			"direction": kpi.get("direction"),
+			"metric": metric,
+			"label": kpi.get("label") or widget.get("label"),
+			"format": format_hint,
+			"show_currency_symbol": bool(show_currency),
+			"subtitle": config.get("subtitle"),
+		},
+		"value": value,
+		"data": {
+			"value": value,
+			"format": format_hint,
+			"kpi_id": kpi_id,
+		},
+		"meta": {
+			"schema_version": 1,
+			**(kpi.get("meta") or {}),
+			"render_hint": "gauge" if is_gauge else "kpi",
+			"kpi_id": kpi_id,
+			"format": format_hint,
+			"section_title": config.get("section_title"),
+			"row_group": config.get("row_group"),
+		},
+	}
+	if config.get("section_title"):
+		result["section_title"] = config.get("section_title")
+	if config.get("row_group"):
+		result["row_group"] = config.get("row_group")
+	if show_ly:
+		result["show_ly"] = True
+	if is_gauge:
+		result["config"] = {"max_value": config.get("max_value") or 100}
+	return result
 
 
 def _kpi_widget_payload(
@@ -823,17 +1174,33 @@ def _kpi_widget_payload(
 ) -> dict[str, Any]:
 	config = widget.get("config") or {}
 	metric = (widget.get("metric_key") or "net_sales").strip().lower()
-	module_key = (widget.get("module_key") or "sales").strip().lower()
+	module_key = _resolve_kpi_module_key(widget, metric)
 	period = _period_from_widget(widget, config)
 	compare = _compare_from_widget(widget, config, compare_override)
 	filters_key = _filters_cache_key(filters)
+	is_gauge = _is_health_gauge_widget(widget, config, metric)
 	cache_metric = f"{module_key}:{metric}" if module_key != "sales" else metric
+	if is_gauge:
+		cache_metric = f"health:{module_key}:{widget.get('key')}"
 
 	kpi = get_cached_kpi(company, cache_metric, period, compare, filters_key)
 	if kpi is None:
+		from erp_analysis.services.kpi.home_metrics import get_home_kpi, is_home_kpi
 		from erp_analysis.services.module_kpis import get_module_kpi, is_module_kpi
 
-		if is_module_kpi(module_key, metric):
+		if is_gauge or is_home_kpi(metric):
+			kpi = get_home_kpi(
+				user=user,
+				company=company,
+				metric_key=metric,
+				module_key=module_key,
+				widget_key=widget.get("key") or "",
+				period=period,
+				compare=compare,
+				from_date=from_date,
+				to_date=to_date,
+			)
+		elif is_module_kpi(module_key, metric):
 			kpi = get_module_kpi(
 				user=user,
 				company=company,
@@ -857,43 +1224,19 @@ def _kpi_widget_payload(
 		set_cached_kpi(company, cache_metric, period, compare, filters_key, kpi)
 
 	format_hint = config.get("format") or kpi.get("meta", {}).get("format") or _default_format_for_metric(metric)
+	if is_gauge:
+		format_hint = "score"
 	show_currency = widget.get("show_currency_symbol")
 	if show_currency is None:
-		show_currency = _is_currency_metric(metric)
-	kpi_id = config.get("kpi_id") or metric
+		show_currency = _is_currency_metric(metric) and not is_gauge
 
-	return {
-		"widget_key": widget["key"],
-		"widget_type": "KPI",
-		"label": widget.get("label"),
-		"kpi": {
-			"kpi_id": kpi_id,
-			"value": kpi.get("value"),
-			"value_ly": kpi.get("value_ly"),
-			"change_pct": kpi.get("change_pct"),
-			"direction": kpi.get("direction"),
-			"metric": metric,
-			"label": kpi.get("label") or widget.get("label"),
-			"format": format_hint,
-			"show_currency_symbol": bool(show_currency),
-			"subtitle": config.get("subtitle"),
-		},
-		"value": kpi.get("value"),
-		"data": {
-			"value": kpi.get("value"),
-			"format": format_hint,
-			"kpi_id": kpi_id,
-		},
-		"meta": {
-			"schema_version": 1,
-			**(kpi.get("meta") or {}),
-			"render_hint": "kpi",
-			"kpi_id": kpi_id,
-			"format": format_hint,
-			"section_title": config.get("section_title"),
-			"row_group": config.get("row_group"),
-		},
-	}
+	return _build_kpi_widget_response(
+		widget,
+		kpi,
+		format_hint=format_hint,
+		show_currency=bool(show_currency),
+		is_gauge=is_gauge,
+	)
 
 
 def _table_widget_payload(
@@ -910,6 +1253,7 @@ def _table_widget_payload(
 	compare_override: Optional[str] = None,
 ) -> dict[str, Any]:
 	config = widget.get("config") or {}
+	limit = _effective_widget_row_limit(widget, limit)
 	if _widget_data_source(config) == "attention":
 		return _attention_widget_payload(
 			user,
@@ -1012,7 +1356,7 @@ def _table_widget_payload(
 	if show_currency is None:
 		show_currency = _is_currency_metric(metric)
 
-	return {
+	result: dict[str, Any] = {
 		"widget_key": widget["key"],
 		"widget_type": widget["widget_type"],
 		"label": widget.get("label"),
@@ -1025,6 +1369,7 @@ def _table_widget_payload(
 			"compare": compare_mode,
 			"show_currency_symbol": bool(show_currency),
 			"extended_metrics": use_extended,
+			"row_limit": limit,
 		},
 		"meta": {
 			"schema_version": 1,
@@ -1034,8 +1379,18 @@ def _table_widget_payload(
 			"drill_depth": resolved_depth,
 			"next_dimension": next_dim,
 			"drillable": bool(next_dim),
+			"row_limit": limit,
 		},
 	}
+	if config.get("section_title"):
+		result["section_title"] = config.get("section_title")
+		result["meta"]["section_title"] = config.get("section_title")
+	if widget["widget_type"] == "RANKING":
+		ranking_series = _legacy_ranking_series_from_table_rows(rows)
+		if ranking_series:
+			result["series"] = ranking_series
+			result["data"] = {"series": ranking_series, "rows": rows}
+	return result
 
 
 def _chart_widget_payload(
@@ -1223,7 +1578,7 @@ def _apply_compare_point(point: dict[str, Any], row: dict[str, Any], compare_mod
 
 
 def _default_format_for_metric(metric: str) -> str:
-	if metric in ("transactions", "sales_qty", "customer_count"):
+	if metric in ("transactions", "sales_qty", "customer_count", "active_customers"):
 		return "integer"
 	if metric in ("gp_pct", "discount_pct"):
 		return "percent"
@@ -1394,6 +1749,80 @@ def _legacy_series_compat(series: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	return out
 
 
+def _dedupe_series_by_label(series: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	seen: set[str] = set()
+	out: list[dict[str, Any]] = []
+	for point in series:
+		if not isinstance(point, dict):
+			continue
+		label = str(point.get("label") or point.get("dimension_value") or "").strip()
+		if not label:
+			continue
+		key = label.lower()
+		if key in seen:
+			continue
+		seen.add(key)
+		out.append(point)
+	return out
+
+
+def _receivables_card_widget_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	limit: int,
+) -> dict[str, Any]:
+	"""Territory breakdown cards for legacy/v2 receivables_card (series + kpis[])."""
+	config = dict(widget.get("config") or {})
+	config.setdefault("payload_source", "legacy_chart")
+	config.setdefault("legacy_method", widget.get("legacy_method") or "erp_analysis.receivables.get_receivables_dashboard")
+	config.setdefault("rows_key", "territory_totals")
+	config.setdefault("label_field", "territory")
+	config.setdefault("value_field", "outstanding")
+	config.setdefault("section_title", "Receivables Card")
+	config.setdefault("row_group", "receivables_card")
+
+	chart_widget = {
+		**widget,
+		"widget_type": "PIE",
+		"config": config,
+	}
+	result = _legacy_chart_widget_payload(user, company, chart_widget, limit, render_hint="pie")
+	series = _dedupe_series_by_label(_legacy_series_compat(result.get("series") or []))
+	row_group = str(config.get("row_group") or "receivables_card")
+
+	kpis: list[dict[str, Any]] = []
+	for point in series:
+		label = str(point.get("label") or point.get("dimension_value") or "").strip()
+		if not label:
+			continue
+		value = round(float(point.get("value") or 0), 2)
+		kpis.append(
+			{
+				"kpi_id": label,
+				"label": label,
+				"value": value,
+				"format": "currency_compact",
+				"row_group": row_group,
+			}
+		)
+
+	result["widget_type"] = widget.get("widget_type") or "PIE"
+	result["series"] = series
+	result["kpis"] = kpis
+	result["chart"]["series"] = series
+	result["data"]["series"] = series
+	result["meta"]["row_group"] = row_group
+	result["meta"]["section_title"] = config.get("section_title")
+	result["meta"]["render_hint"] = "pie"
+	if config.get("section_title"):
+		result["section_title"] = config.get("section_title")
+	if row_group:
+		result["row_group"] = row_group
+
+	return result
+
+
 def _legacy_ranking_series_from_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	series: list[dict[str, Any]] = []
 	for row in rows:
@@ -1403,13 +1832,18 @@ def _legacy_ranking_series_from_table_rows(rows: list[dict[str, Any]]) -> list[d
 		value = row.get("metric")
 		if label is None:
 			continue
-		series.append(
-			{
-				"label": str(label),
-				"value": round(float(value or 0), 2),
-				"dimension_value": str(label),
-			}
-		)
+		entry: dict[str, Any] = {
+			"label": str(label),
+			"value": round(float(value or 0), 2),
+			"dimension_value": row.get("dimension_value") or str(label),
+		}
+		if row.get("metric_ly") is not None:
+			entry["value_ly"] = row.get("metric_ly")
+		if row.get("change_pct") is not None:
+			entry["change_pct"] = row.get("change_pct")
+		if row.get("rank") is not None:
+			entry["rank"] = row.get("rank")
+		series.append(entry)
 	return series
 
 

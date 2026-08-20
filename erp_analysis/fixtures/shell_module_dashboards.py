@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # Bottom nav uses short keys (receivables); dashboards live on *_overview boards.
 SHELL_MODULE_TO_DASHBOARD: dict[str, str] = {
+	"sales": "sales_overview",
 	"receivables": "receivables_overview",
 	"inventory": "inventory_overview",
 	"collection": "collection_overview",
@@ -17,6 +18,7 @@ DASHBOARD_TO_SHELL_MODULE: dict[str, str] = {
 # Extra aliases the mobile app may send when opening a tab or deep link.
 DASHBOARD_BOARD_ALIASES: dict[str, str] = {
 	**SHELL_MODULE_TO_DASHBOARD,
+	"sales_home": "sales_overview",
 	"receivables_home": "receivables_overview",
 	"inventory_home": "inventory_overview",
 	"collection_home": "collection_overview",

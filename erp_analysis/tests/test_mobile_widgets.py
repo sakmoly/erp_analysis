@@ -336,3 +336,75 @@ class TestMobileWidgets(FrappeTestCase):
 
 		self.assertEqual(result["dashboard_id"], "sales_overview")
 		self.assertIn("sales_dash_net_ytd_kpi", result["widgets"])
+
+	def test_receivables_card_returns_territory_kpis_and_series(self):
+		from erp_analysis.services.mobile_widgets import get_dashboard_widget_data
+
+		widget = {
+			"key": "receivables_card",
+			"label": "Receivables Card",
+			"widget_type": "PIE",
+			"module_key": "receivables",
+			"metric_key": "outstanding",
+			"dimension_key": "territory",
+			"legacy_method": "erp_analysis.receivables.get_receivables_dashboard",
+			"config": {
+				"payload_source": "legacy_chart",
+				"rows_key": "territory_totals",
+				"label_field": "territory",
+				"value_field": "outstanding",
+				"row_group": "receivables_card",
+			},
+		}
+		legacy_payload = {
+			"territory_totals": [
+				{"territory": "Riyadh", "outstanding": 100.0},
+				{"territory": "Jeddah", "outstanding": 200.0},
+				{"territory": "Jeddah", "outstanding": 50.0},
+			]
+		}
+		with patch(
+			"erp_analysis.services.mobile_widgets.resolve_widget_definition",
+			return_value=widget,
+		), patch(
+			"erp_analysis.services.mobile_widgets.guard_mobile_api",
+			return_value={"user": frappe.session.user, "company": "Test Co"},
+		), patch(
+			"erp_analysis.services.mobile_widgets._call_legacy_method",
+			return_value=legacy_payload,
+		):
+			result = get_dashboard_widget_data(
+				user=frappe.session.user,
+				widget_key="receivables_card",
+			)
+
+		self.assertEqual(result["widget_key"], "receivables_card")
+		self.assertEqual(len(result["series"]), 2)
+		self.assertEqual(len(result["kpis"]), 2)
+		labels = {k["label"] for k in result["kpis"]}
+		self.assertEqual(labels, {"Riyadh", "Jeddah"})
+		jeddah = next(k for k in result["kpis"] if k["label"] == "Jeddah")
+		self.assertEqual(jeddah["kpi_id"], "Jeddah")
+		self.assertEqual(jeddah["value"], 200.0)
+		self.assertEqual(jeddah["row_group"], "receivables_card")
+
+	def test_sales_cogs_kpi_uses_gross_profit_engine(self):
+		from erp_analysis.services.analytics_sales import get_sales_kpi
+
+		with patch(
+			"erp_analysis.services.analytics_sales._query_cogs_kpi",
+			side_effect=[12823395.87, 15200000.0],
+		):
+			result = get_sales_kpi(
+				user=frappe.session.user,
+				company="Test Co",
+				metric="cogs",
+				period="ytd",
+				compare="ly",
+			)
+
+		self.assertEqual(result["metric"], "cogs")
+		self.assertEqual(result["label"], "COGS")
+		self.assertEqual(result["value"], 12823395.87)
+		self.assertEqual(result["value_ly"], 15200000.0)
+		self.assertEqual(result["meta"]["format"], "currency_compact")
