@@ -6,15 +6,12 @@ from unittest.mock import patch
 
 
 class TestHomeNetProfit(FrappeTestCase):
-	def test_net_profit_is_gross_profit_minus_operating_expense(self):
+	def test_net_profit_is_gl_income_minus_expense(self):
 		from erp_analysis.services.kpi.home_metrics import _net_profit_kpi
 
 		with patch(
-			"erp_analysis.services.kpi.home_metrics._gross_profit_kpi",
-			return_value={"value": 3_360_115.78, "value_ly": None},
-		), patch(
-			"erp_analysis.services.kpi.home_metrics._gl_operating_expense_total",
-			return_value=1_181_867.02,
+			"erp_analysis.services.kpi.home_metrics._gl_net_profit_total",
+			return_value=3_599_383.48,
 		):
 			result = _net_profit_kpi(
 				company="Test Co",
@@ -23,5 +20,5 @@ class TestHomeNetProfit(FrappeTestCase):
 				to_date=None,
 			)
 
-		self.assertEqual(result["value"], 2_178_248.76)
-		self.assertLess(result["value"], 3_360_115.78)
+		self.assertEqual(result["value"], 3_599_383.48)
+		self.assertEqual(result["metric"], "net_profit")

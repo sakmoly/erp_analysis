@@ -8,6 +8,7 @@ from erp_analysis.permissions.access_profile import (
     warehouse_sql,
 )
 from erp_analysis.services.inventory_hierarchy_territory import (
+    get_item_stock_by_code as _get_item_stock_by_code,
     get_territory_hierarchy,
     is_territory_path,
 )
@@ -141,6 +142,9 @@ def get_inventory_snapshot(company=None, warehouse=None, fast: bool = True):
 
     result = {
         "totalInventoryValue": float(total_value),
+        "totalQty": 0.0,
+        "availableValue": 0.0,
+        "reservedValue": 0.0,
         "inventoryTurnoverRatio": 0.0,
         "averageDaysInInventory": 0,
         "agingBreakdown": aging_with_pct,
@@ -204,6 +208,14 @@ def get_inventory_snapshot(company=None, warehouse=None, fast: bool = True):
     avg_days_result = frappe.db.sql(avg_days_query, avg_days_params, as_dict=True)
     if avg_days_result and len(avg_days_result) > 0:
         result["averageDaysInInventory"] = int(avg_days_result[0].avg_days or 0)
+
+    from erp_analysis.services.kpi.inventory_summary import get_inventory_summary_kpis
+
+    summary = get_inventory_summary_kpis(company=company)
+    result["totalQty"] = float(summary.get("stock_qty") or 0)
+    result["availableValue"] = float(summary.get("available_value") or 0)
+    result["reservedValue"] = float(summary.get("reserved_value") or 0)
+    result["turnover"] = float(summary.get("turnover") or result["inventoryTurnoverRatio"])
 
     # Cache result for 5 minutes (300 seconds)
     try:
@@ -859,6 +871,7 @@ def get_inventory_hierarchy(
                 warehouse=warehouse,
                 brand=brand,
                 item_group=item_group,
+                item_code=item_code,
                 limit=limit,
             )
 
@@ -1089,6 +1102,31 @@ def get_inventory_hierarchy(
             title="Inventory Hierarchy API Error"
         )
         frappe.throw(f"Error fetching inventory hierarchy: {str(e)}")
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_item_stock_by_code(
+    company=None,
+    item_code=None,
+    territory=None,
+    territories=None,
+    **kwargs,
+):
+    """Stock for one item: total qty/value plus lines per (territory, warehouse)."""
+    company = company or frappe.defaults.get_user_default("Company")
+    if not company:
+        frappe.throw(_("Company not found"))
+    item_code = (item_code or kwargs.get("item_code") or "").strip()
+    if not item_code:
+        frappe.throw(_("item_code is required"))
+    territory = territory or kwargs.get("territory")
+    territories = territories or kwargs.get("territories")
+    return _get_item_stock_by_code(
+        company,
+        item_code,
+        territory=territory,
+        territories=territories,
+    )
 
 
 @frappe.whitelist()

@@ -38,6 +38,25 @@ def get_inventory_hierarchy(
 	)
 
 
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_item_stock_by_code(
+	company: Optional[str] = None,
+	item_code: Optional[str] = None,
+	territory: Optional[str] = None,
+	territories: Optional[str] = None,
+	**kwargs,
+):
+	"""Mobile path: erp_analysis.stock.get_item_stock_by_code"""
+	from erp_analysis.inventory import get_item_stock_by_code as _impl
+
+	return _impl(
+		company=company,
+		item_code=item_code,
+		territory=territory,
+		territories=territories,
+	)
+
+
 @frappe.whitelist()
 def get_inventory_items(
 	company: Optional[str] = None,

@@ -514,8 +514,34 @@ def get_salesperson_performance(company=None, period=None, from_date=None, to_da
 
 
 @frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
-def get_product_performance(company=None, group_by=None, period=None, from_date=None, to_date=None, limit=None, **kwargs):
+def get_product_performance(
+	company=None,
+	group_by=None,
+	period=None,
+	from_date=None,
+	to_date=None,
+	limit=None,
+	level=None,
+	item_code=None,
+	brand=None,
+	territory=None,
+	territories=None,
+	**kwargs,
+):
 	"""Mobile contract alias for product performance ranking."""
 	from erp_analysis.sales_performance import get_product_performance as _impl
 
-	return _impl(company=company, group_by=group_by, period=period, from_date=from_date, to_date=to_date, limit=limit)
+	return _impl(
+		company=company,
+		group_by=group_by,
+		period=period,
+		from_date=from_date,
+		to_date=to_date,
+		limit=limit,
+		level=level or kwargs.get("level"),
+		item_code=item_code or kwargs.get("item_code"),
+		brand=brand or kwargs.get("brand"),
+		territory=territory or kwargs.get("territory"),
+		territories=territories or kwargs.get("territories"),
+		**kwargs,
+	)

@@ -25,6 +25,9 @@ RECEIVABLES_KPI_METRICS = frozenset(
 		"not_due",
 		"customer_count",
 		"customers",
+		"customer_advances",
+		"total_customer_advances",
+		"advance_customers",
 	}
 )
 
@@ -33,6 +36,15 @@ INVENTORY_KPI_METRICS = frozenset(
 		"inventory_value",
 		"value",
 		"stock_value",
+		"stock_qty",
+		"total_qty",
+		"available_value",
+		"reserved_value",
+		"turnover",
+		"inventory_turnover",
+		"days_of_inventory",
+		"avg_days",
+		"days_of_cover",
 		"low_stock",
 		"low_stock_count",
 		"non_moving",
@@ -48,6 +60,9 @@ COLLECTION_KPI_METRICS = frozenset(
 		"collection_ytd",
 		"collection_efficiency",
 		"avg_collection_days",
+		"customer_advances",
+		"total_customer_advances",
+		"advance_customers",
 	}
 )
 
@@ -65,7 +80,14 @@ PURCHASE_KPI_METRICS = frozenset(
 )
 
 SALES_ORDERS_KPI_METRICS = frozenset(
-	{"open_so_value", "pending_delivery", "open_so_count", "pending_delivery_count"}
+	{
+		"open_so_value",
+		"pending_delivery",
+		"open_so_count",
+		"pending_delivery_count",
+		"total_orders",
+		"open_orders",
+	}
 )
 
 RECEIVABLES_EXTENDED_METRICS = frozenset({"dso", "days_sales_outstanding"})
@@ -96,23 +118,24 @@ def get_module_kpi(
 	module_key: str,
 	metric_key: str,
 	period: str = "mtd",
+	filters: Any = None,
 ) -> dict[str, Any]:
 	module = (module_key or "").strip().lower()
 	metric = (metric_key or "").strip().lower()
 	period_key = (period or "mtd").strip().lower()
 
 	if module in ("receivables", "receivable", "ar"):
-		return _receivables_kpi(company, metric)
+		return _receivables_kpi(company, metric, filters=filters)
 	if module in ("inventory", "stock"):
 		return _inventory_kpi(company, metric)
 	if module == "collection":
-		return _collection_kpi(company, metric, period_key)
+		return _collection_kpi(company, metric, period_key, filters=filters)
 	if module in ("purchase", "purchasing", "purchases"):
 		return _purchase_kpi(company, metric, period_key)
 	if module in ("payables", "payable", "ap"):
 		return _payables_kpi(company, metric)
 	if module in ("sales_orders", "sales_order"):
-		return _sales_orders_kpi(company, metric)
+		return _sales_orders_kpi(company, metric, user=user, filters=filters)
 
 	frappe.throw(
 		_("Unsupported module KPI: {0}/{1}").format(module_key, metric_key),
@@ -132,8 +155,27 @@ def _kpi_result(*, metric: str, label: str, value: float, fmt: str = "currency_c
 	}
 
 
-def _receivables_kpi(company: Optional[str], metric: str) -> dict[str, Any]:
-	kpis = get_receivables_summary_kpis(company=company)
+def _territory_scope_from_filters(filters: Any) -> tuple[Optional[str], Optional[list[str]]]:
+	from erp_analysis.services.analytics_dimensions import parse_logical_filters
+
+	parsed = parse_logical_filters(filters)
+	territories = [
+		str(t).strip() for t in (parsed.get("territory") or []) if t is not None and str(t).strip()
+	]
+	if len(territories) == 1:
+		return territories[0], None
+	if len(territories) > 1:
+		return None, territories
+	return None, None
+
+
+def _receivables_kpi(company: Optional[str], metric: str, *, filters: Any = None) -> dict[str, Any]:
+	territory, territories = _territory_scope_from_filters(filters)
+	kpis = get_receivables_summary_kpis(
+		company=company,
+		territory=territory,
+		territories=territories,
+	)
 	total = float(kpis["total"])
 	overdue = float(kpis["overdue"])
 
@@ -151,8 +193,35 @@ def _receivables_kpi(company: Optional[str], metric: str) -> dict[str, Any]:
 	if metric in ("current", "not_due"):
 		return _kpi_result(metric=metric, label="Not Yet Due", value=max(total - overdue, 0))
 	if metric in ("customer_count", "customers"):
-		count = _receivables_customer_count(company)
+		count = _receivables_customer_count(company, territory=territory, territories=territories)
 		return _kpi_result(metric=metric, label="Customers Owing", value=count, fmt="integer")
+	if metric in ("customer_advances", "total_customer_advances"):
+		from erp_analysis.services.collection import get_customer_advances_summary
+
+		summary = get_customer_advances_summary(
+			company=company,
+			territory=territory,
+			territories=territories,
+		)
+		return _kpi_result(
+			metric=metric,
+			label="Customer Advances",
+			value=summary.get("total_advance") or 0,
+		)
+	if metric in ("advance_customers",):
+		from erp_analysis.services.collection import get_customer_advances_summary
+
+		summary = get_customer_advances_summary(
+			company=company,
+			territory=territory,
+			territories=territories,
+		)
+		return _kpi_result(
+			metric=metric,
+			label="Customers with Advance",
+			value=summary.get("customer_count") or 0,
+			fmt="integer",
+		)
 	if metric in ("dso", "days_sales_outstanding"):
 		snap = _receivables_snapshot(company)
 		return _kpi_result(
@@ -170,12 +239,25 @@ def _receivables_snapshot(company: Optional[str]) -> dict[str, Any]:
 	return get_receivables_snapshot(company=company) or {}
 
 
-def _receivables_customer_count(company: Optional[str]) -> int:
+def _receivables_customer_count(
+	company: Optional[str],
+	*,
+	territory: Optional[str] = None,
+	territories: Optional[list[str]] = None,
+) -> int:
 	if not company:
 		return 0
 	from erp_analysis.permissions.access_profile import resolve_territory_scope, si_territory_sql
 
-	scope = resolve_territory_scope(company=company, purpose="view", module="receivables")
+	if territories is not None:
+		scope = territories
+	else:
+		scope = resolve_territory_scope(
+			requested=territory,
+			company=company,
+			purpose="view",
+			module="receivables",
+		)
 	terr_sql, terr_params = si_territory_sql(scope, field="territory")
 	row = frappe.db.sql(
 		f"""
@@ -193,6 +275,37 @@ def _inventory_kpi(company: Optional[str], metric: str) -> dict[str, Any]:
 	kpis = get_inventory_summary_kpis(company=company)
 	if metric in ("inventory_value", "value", "stock_value"):
 		return _kpi_result(metric=metric, label="Stock Value", value=kpis["value"])
+	if metric in ("stock_qty", "total_qty"):
+		return _kpi_result(
+			metric=metric,
+			label="Stock Quantity",
+			value=kpis["stock_qty"],
+			fmt="integer",
+		)
+	if metric == "available_value":
+		return _kpi_result(metric=metric, label="Available Value", value=kpis["available_value"])
+	if metric == "reserved_value":
+		return _kpi_result(metric=metric, label="Reserved Value", value=kpis["reserved_value"])
+	if metric in ("turnover", "inventory_turnover"):
+		return _kpi_result(
+			metric=metric,
+			label="Inventory Turnover",
+			value=kpis["turnover"],
+			fmt="decimal",
+		)
+	if metric in ("days_of_inventory", "avg_days", "days_of_cover"):
+		from erp_analysis.services.stock_cover import get_stock_cover_payload
+
+		cover = get_stock_cover_payload(company=company)
+		days = float((cover.get("kpis") or {}).get("avg_cover_days") or 0)
+		if days <= 0:
+			days = float(kpis["days_of_inventory"])
+		return _kpi_result(
+			metric=metric,
+			label="Days of Inventory",
+			value=days,
+			fmt="integer",
+		)
 	if metric in ("low_stock", "low_stock_count"):
 		return _kpi_result(
 			metric=metric,
@@ -210,7 +323,35 @@ def _inventory_kpi(company: Optional[str], metric: str) -> dict[str, Any]:
 	frappe.throw(_("Unsupported inventory metric: {0}").format(metric), frappe.ValidationError)
 
 
-def _collection_kpi(company: Optional[str], metric: str, period: str) -> dict[str, Any]:
+def _collection_kpi(
+	company: Optional[str],
+	metric: str,
+	period: str,
+	*,
+	filters: Any = None,
+) -> dict[str, Any]:
+	if metric in ("customer_advances", "total_customer_advances", "advance_customers"):
+		territory, territories = _territory_scope_from_filters(filters)
+		from erp_analysis.services.collection import get_customer_advances_summary
+
+		summary = get_customer_advances_summary(
+			company=company,
+			territory=territory,
+			territories=territories,
+		)
+		if metric in ("advance_customers",):
+			return _kpi_result(
+				metric=metric,
+				label="Customers with Advance",
+				value=summary.get("customer_count") or 0,
+				fmt="integer",
+			)
+		return _kpi_result(
+			metric=metric,
+			label="Customer Advances",
+			value=summary.get("total_advance") or 0,
+		)
+
 	kpis = get_collection_period_kpis(company=company)
 	if metric in ("collected_mtd", "collection_mtd") or (metric == "collected" and period == "mtd"):
 		return _kpi_result(metric=metric, label="Collected MTD", value=kpis.get("mtd") or 0)
@@ -272,7 +413,31 @@ def _purchase_kpi(company: Optional[str], metric: str, period: str = "mtd") -> d
 	frappe.throw(_("Unsupported purchase metric: {0}").format(metric), frappe.ValidationError)
 
 
-def _sales_orders_kpi(company: Optional[str], metric: str) -> dict[str, Any]:
+def _sales_orders_kpi(
+	company: Optional[str],
+	metric: str,
+	*,
+	user: Optional[str] = None,
+	filters: Any = None,
+) -> dict[str, Any]:
+	from erp_analysis.services.sales_orders import get_open_so_summary, get_order_book_summary
+
+	count_metrics = ("open_so_count", "pending_delivery_count", "total_orders", "open_orders")
+	if metric in count_metrics or metric in ("open_so_value", "pending_delivery", "pending_delivery_value"):
+		summary = get_open_so_summary(user=user, company=company, filters=filters)
+		if metric in ("open_so_value", "open_value", "pending_delivery", "pending_delivery_value"):
+			return _kpi_result(
+				metric=metric,
+				label="Pending Delivery" if "pending" in metric else "Open SO Value",
+				value=summary.get("open_so_value") or 0,
+			)
+		return _kpi_result(
+			metric=metric,
+			label="Open Sales Orders",
+			value=summary.get("open_so_count") or 0,
+			fmt="integer",
+		)
+
 	kpis = get_order_book_summary(company=company)
 	if metric in ("open_so_value", "open_value"):
 		return _kpi_result(metric=metric, label="Open SO Value", value=kpis.get("open_value") or 0)

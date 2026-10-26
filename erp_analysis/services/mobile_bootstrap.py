@@ -30,19 +30,10 @@ from erp_analysis.services.mobile_profile import (
 	sanitize_widget_for_bootstrap,
 )
 
-BOOTSTRAP_SCHEMA_VERSION = 5
+BOOTSTRAP_SCHEMA_VERSION = 8
 
-# Ops dashboard boards — embed batch widget payloads in bootstrap (mobile merge fallback).
-_BOOTSTRAP_HYDRATED_BOARDS = frozenset(
-	{
-		"home",
-		"sales_overview",
-		"receivables_overview",
-		"inventory_overview",
-		"collection_overview",
-		"executive_overview",
-	}
-)
+# Optional bootstrap hydrate: only primary boards (layout-only boot is default).
+_BOOTSTRAP_HYDRATED_BOARDS = frozenset({"home", "sales_overview"})
 
 DIMENSION_LABELS: dict[str, str] = {
 	"company": "Company",
@@ -59,6 +50,9 @@ DIMENSION_LABELS: dict[str, str] = {
 def build_mobile_bootstrap(
 	user: Optional[str] = None,
 	company: Optional[str] = None,
+	*,
+	hydrate: bool = False,
+	board_request: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
 	"""Assemble authenticated mobile bootstrap (server-resolved profile + access)."""
 	user = require_authenticated_user() if not user or user == "Guest" else user
@@ -73,11 +67,16 @@ def build_mobile_bootstrap(
 	modules = _build_modules(user, company, profile_name, legacy_config, access)
 	dimensions = _build_dimensions(profile_name, legacy_config)
 	dashboard_boards = _build_dashboard_boards(profile_name, legacy_config)
-	dashboard_boards, board_data = _hydrate_dashboard_boards_with_data(user, company, dashboard_boards)
+	if hydrate:
+		dashboard_boards, board_data = _hydrate_dashboard_boards_with_data(
+			user, company, dashboard_boards, board_request=board_request or {}
+		)
+	else:
+		board_data = None
 	dashboard = _default_dashboard_widgets(dashboard_boards, profile_name, legacy_config)
 	branding = _build_branding(profile_name, legacy_config)
 	context = _build_context(user, company, profile_name, access)
-	capabilities = _build_capabilities(access)
+	capabilities = _build_capabilities(access, user=user, company=company)
 
 	return {
 		"schema_version": BOOTSTRAP_SCHEMA_VERSION,
@@ -148,12 +147,21 @@ def _build_context(
 	return ctx
 
 
-def _build_capabilities(access: dict[str, Any]) -> dict[str, Any]:
+def _build_capabilities(
+	access: dict[str, Any],
+	*,
+	user: Optional[str] = None,
+	company: Optional[str] = None,
+) -> dict[str, Any]:
+	from erp_analysis.services.sales_dashboard_refresh import user_can_refresh_sales_dashboard
+
 	scope = access.get("scope") or {}
+	user = user or frappe.session.user
 	return {
 		"allow_view_all_sales": bool(scope.get("allow_view_all_sales")),
 		"allow_view_all_stock": bool(scope.get("allow_view_all_stock")),
 		"allow_all_receivable": bool(scope.get("allow_all_receivable")),
+		"can_refresh_sales_dashboard": user_can_refresh_sales_dashboard(user, company),
 	}
 
 
@@ -311,10 +319,13 @@ def _hydrate_dashboard_boards_with_data(
 	user: str,
 	company: Optional[str],
 	boards: list[dict[str, Any]],
+	*,
+	board_request: Optional[dict[str, Any]] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 	"""Merge batch widget payloads into bootstrap boards (mobile fallback when batch merge fails)."""
 	from erp_analysis.services.mobile_widgets import get_dashboard_board_data
 
+	board_request = board_request or {}
 	hydrated_boards: list[dict[str, Any]] = []
 	board_data: dict[str, Any] = {}
 
@@ -330,9 +341,15 @@ def _hydrate_dashboard_boards_with_data(
 				user=user,
 				company=company,
 				dashboard_id=board_key,
-				use_cache=False,
-				refresh=True,
-				limit=10,
+				use_cache=True,
+				refresh=False,
+				limit=int(board_request.get("limit") or 10),
+				from_date=board_request.get("from_date"),
+				to_date=board_request.get("to_date"),
+				period=board_request.get("period") or "ytd",
+				show_ly=board_request.get("show_ly", 1),
+				filters=board_request.get("filters"),
+				territory=board_request.get("territory"),
 			)
 			widgets_by_key = batch.get("widgets") or {}
 			board_data[board_key] = {

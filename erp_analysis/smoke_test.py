@@ -159,6 +159,7 @@ def run_smoke_tests(user: str | None = DEFAULT_SMOKE_USER) -> dict[str, Any]:
 				"erp_analysis.approvals.approve_document",
 				"erp_analysis.approvals.reject_document",
 				"erp_analysis.customer_notifications.send_statement_pdf",
+				"erp_analysis.customer_notifications.get_statement_pdf",
 			):
 				entry.update({"status": "SKIP", "error": "Side-effect POST — whitelisted only"})
 				results.append(entry)

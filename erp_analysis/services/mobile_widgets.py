@@ -10,14 +10,13 @@ from typing import Any, Optional
 import frappe
 from frappe import _
 
-from erp_analysis.access_context import get_effective_company, guard_mobile_api
+from erp_analysis.access_context import get_effective_company, guard_mobile_api, has_module_access
 from erp_analysis.fixtures.shell_module_dashboards import resolve_dashboard_board_id
 from erp_analysis.services.mobile_profile import get_profile_widgets, resolve_mobile_app_profile_name
 from erp_analysis.services.widget_batch_cache import (
 	get_cached_kpi,
 	reset_batch_kpi_cache,
 	set_cached_kpi,
-	warm_batch_kpi_cache,
 )
 
 CHART_WIDGET_TYPES = frozenset({"PIE", "DONUT", "BAR", "LINE"})
@@ -26,7 +25,19 @@ LEGACY_WIDGET_TYPES = frozenset({"LIST", "MATRIX"})
 NAV_WIDGET_TYPES = frozenset({"LINK"})
 
 BOARD_DATA_CACHE_TTL = 180
-BOARD_DATA_CACHE_VERSION = 11
+BOARD_DATA_CACHE_VERSION = 37
+LEGACY_WIDGET_CACHE_TTL = 120
+LEGACY_WIDGET_CACHE_VERSION = 1
+_LEGACY_WIDGET_CACHE_KEYS = frozenset(
+	{
+		"home_quick_insights",
+		"home_recent_activities",
+		"home_trend_overview",
+	}
+)
+
+# Mobile clients cache board JSON locally; bump when KPI semantics change.
+BOARD_DATA_REVISION = 4
 
 
 def _effective_widget_row_limit(widget: dict[str, Any], limit: int) -> int:
@@ -81,11 +92,103 @@ KPI_WIDGET_ALIASES: dict[str, list[str]] = {
 	"sales_gp_margin_kpi": ["gross_profit_margin_kpi", "gp_margin_kpi"],
 	"sales_active_customers_kpi": ["active_customers_kpi", "customer_count_kpi"],
 	"sales_returns_kpi": ["returns_kpi", "sales_return_kpi"],
+	"sales_orders_kpi": ["total_orders_kpi", "total_orders"],
 }
 
 CHART_WIDGET_ALIASES: dict[str, list[str]] = {
 	"sales_trend_line": ["sales_overview_trend", "sales_trend_chart"],
 }
+
+_SALES_OVERVIEW_DASHBOARD_KPI_KEYS = frozenset(
+	{"sales_total_kpi", "sales_dash_net_ytd_kpi", "net_sales_kpi"}
+)
+
+# Sales Overview board: honour filter bar (territory) via analytics_sales.get_sales_kpi.
+_SALES_OVERVIEW_ANALYTICS_METRICS = frozenset(
+	{
+		"gross_profit",
+		"gp_pct",
+		"gross_profit_pct",
+		"cogs",
+		"sales_return",
+		"discount_amount",
+		"customer_count",
+		"active_customers",
+		"transactions",
+		"average_transaction",
+	}
+)
+
+
+def _board_filters_have_scope(filters: Any) -> bool:
+	from erp_analysis.services.analytics_dimensions import parse_logical_filters
+
+	parsed = parse_logical_filters(filters)
+	if parsed.get("territory"):
+		return True
+	return bool(parsed)
+
+
+def _uses_filter_aware_sales_kpi(widget: dict[str, Any], metric: str, filters: Any) -> bool:
+	"""Use get_sales_kpi when the board filter bar scopes territory (Home + Sales Overview)."""
+	metric = (metric or "").strip().lower()
+	if metric not in _SALES_OVERVIEW_ANALYTICS_METRICS:
+		return False
+	board = (widget.get("dashboard_id") or "").strip()
+	if board == "sales_overview":
+		return True
+	if board == "home" and _board_filters_have_scope(filters):
+		return True
+	return False
+
+
+def _build_canonical_widget_key_map() -> dict[str, str]:
+	"""Map alias / kpi_id keys → canonical profile widget_key."""
+	out: dict[str, str] = dict(WIDGET_KEY_ALIASES)
+	for groups in (KPI_WIDGET_ALIASES, RANKING_WIDGET_ALIASES, DONUT_WIDGET_ALIASES, CHART_WIDGET_ALIASES):
+		for canonical, aliases in groups.items():
+			out[canonical] = canonical
+			for alias in aliases or []:
+				alias_key = str(alias).strip()
+				if alias_key:
+					out[alias_key] = canonical
+	return out
+
+
+CANONICAL_WIDGET_KEYS = _build_canonical_widget_key_map()
+
+
+def _canonical_widget_key(key: str) -> str:
+	key = (key or "").strip()
+	if not key:
+		return key
+	return CANONICAL_WIDGET_KEYS.get(key, key)
+
+
+def _uses_dashboard_sales_kpi(
+	widget: dict[str, Any],
+	config: dict[str, Any],
+	*,
+	user: str,
+	company: Optional[str],
+	filters: Any = None,
+) -> bool:
+	from erp_analysis.services.analytics_sales import company_wide_sales_view_for_filters
+
+	if company_wide_sales_view_for_filters(user, company, filters):
+		return False
+	if _widget_data_source(config) == "dashboard":
+		return True
+	if not frappe.db.table_exists("SalesDashBoard"):
+		return False
+	key = _canonical_widget_key(widget.get("key") or "")
+	board = (widget.get("dashboard_id") or "").strip()
+	metric = (widget.get("metric_key") or "").strip().lower()
+	if metric and metric != "net_sales":
+		return False
+	if key in _SALES_OVERVIEW_DASHBOARD_KPI_KEYS:
+		return board in ("", "sales_overview")
+	return False
 
 
 def _register_receivables_territory_aliases(widgets_out: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -128,7 +231,8 @@ def _register_widget_payload_aliases(
 
 	if payload.get("widget_type") == "KPI":
 		kpi_id = (config.get("kpi_id") or payload.get("kpi", {}).get("kpi_id") or key).strip()
-		if kpi_id:
+		# Avoid a second board tile when kpi_id differs from widget_key but label matches (native dedupes poorly).
+		if kpi_id and kpi_id != key:
 			widgets_out[kpi_id] = payload
 		for alias in KPI_WIDGET_ALIASES.get(key, []):
 			alias_key = str(alias).strip()
@@ -344,8 +448,565 @@ def _filters_cache_key(filters: Any) -> str:
 		return str(filters)
 
 
+_TERRITORY_ALL_SENTINELS = frozenset({"", "all", "all territories", "all territory", "any"})
+
+
+def _clean_territory_filter_values(values: list[Any]) -> list[str]:
+	cleaned: list[str] = []
+	for value in values or []:
+		text = str(value or "").strip()
+		if not text or text.lower() in _TERRITORY_ALL_SENTINELS:
+			continue
+		cleaned.append(text)
+	return cleaned
+
+
+def _known_division_values(company: Optional[str] = None) -> set[str]:
+	cache_key = f"mobile_division_values:{company or ''}"
+	cached = frappe.cache().get_value(cache_key)
+	if cached is not None:
+		return set(cached)
+	names: set[str] = set()
+	if frappe.db.table_exists("SalesDashBoard") and frappe.db.has_column("SalesDashBoard", "Division"):
+		rows = frappe.db.sql(
+			"""
+			SELECT DISTINCT COALESCE(`Division`, '') AS division
+			FROM `tabSalesDashBoard`
+			WHERE COALESCE(`Division`, '') != ''
+			""",
+			as_dict=True,
+		)
+		names = {str(r.get("division") or "").strip() for r in rows if str(r.get("division") or "").strip()}
+	frappe.cache().set_value(cache_key, list(names), expires_in_sec=3600)
+	return names
+
+
+def _parse_drill_stack(raw: Any) -> dict[str, list[Any]]:
+	"""Mobile drill breadcrumbs: [{dimension, value|label}, ...]."""
+	from erp_analysis.services.analytics_dimensions import DIMENSION_KEY_ALIASES
+
+	if raw is None or raw == "":
+		return {}
+	if isinstance(raw, str):
+		try:
+			raw = json.loads(raw)
+		except Exception:
+			return {}
+	if not isinstance(raw, (list, tuple)):
+		return {}
+	out: dict[str, list[Any]] = {}
+	for entry in raw:
+		if not isinstance(entry, dict):
+			continue
+		dim = (entry.get("dimension") or entry.get("key") or "").strip().lower()
+		dim = DIMENSION_KEY_ALIASES.get(dim, dim)
+		val = entry.get("value") or entry.get("label") or entry.get("name")
+		if not dim or val is None or not str(val).strip():
+			continue
+		out.setdefault(dim, [])
+		text = str(val).strip()
+		if text not in out[dim]:
+			out[dim].append(text)
+	return out
+
+
+def _drill_crumbs_length(kwargs: dict[str, Any]) -> int:
+	from erp_analysis.utils.rpc import get_arg
+
+	raw = get_arg("drill_crumbs", kwargs.get("drill_crumbs"))
+	if raw is None or raw == "":
+		raw = get_arg("crumbs", kwargs.get("crumbs"))
+	if raw is None or raw == "":
+		return 0
+	if isinstance(raw, str):
+		try:
+			raw = json.loads(raw)
+		except Exception:
+			return 0
+	if isinstance(raw, (list, tuple)):
+		return len([e for e in raw if isinstance(e, dict)])
+	return 0
+
+
+def _resolve_effective_drill_depth(
+	widget: dict[str, Any],
+	*,
+	drill_depth: Optional[int],
+	dimension: Optional[str],
+	parsed: Optional[dict[str, list[Any]]],
+	kwargs: dict[str, Any],
+) -> Optional[int]:
+	"""Infer drill depth when mobile sends `dimension` or crumbs but omits drill_depth."""
+	from erp_analysis.services.analytics_dimensions import DIMENSION_KEY_ALIASES
+
+	config = widget.get("config") or {}
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+	if not drill_path:
+		return int(drill_depth) if drill_depth is not None else None
+
+	if drill_depth is not None:
+		return int(drill_depth)
+
+	candidates: list[int] = []
+	crumbs_len = _drill_crumbs_length(kwargs)
+	if crumbs_len > 0:
+		candidates.append(crumbs_len)
+
+	out = dict(parsed or {})
+	for stack_key in ("drill_stack", "filter_stack", "drill_crumbs", "crumbs", "breadcrumb"):
+		for key, values in _parse_drill_stack(kwargs.get(stack_key) or frappe.form_dict.get(stack_key)).items():
+			if values:
+				out.setdefault(key, [])
+				for val in values:
+					if val not in out[key]:
+						out[key].append(val)
+
+	if not out.get("sub_group") and out.get("item_group"):
+		out["sub_group"] = list(out["item_group"])
+
+	prefix_depth = 0
+	for path_dim in drill_path:
+		key = DIMENSION_KEY_ALIASES.get(path_dim, path_dim)
+		if out.get(key):
+			prefix_depth += 1
+		else:
+			break
+	if prefix_depth > 0:
+		candidates.append(prefix_depth)
+
+	dim = (dimension or "").strip().lower()
+	if dim:
+		dim = DIMENSION_KEY_ALIASES.get(dim, dim)
+		idx = _depth_for_dimension(dim, drill_path)
+		if idx is not None:
+			candidates.append(idx)
+
+	if not candidates:
+		return None
+	return max(candidates)
+
+
+def _normalize_drill_filters(
+	user: str,
+	company: Optional[str],
+	*,
+	widget: dict[str, Any],
+	drill_depth: Optional[int],
+	dimension: Optional[str],
+	parsed: Optional[dict[str, list[Any]]],
+	kwargs: dict[str, Any],
+) -> tuple[Optional[dict[str, list[Any]]], bool]:
+	"""
+	Apply drill_path parent filters; refuse unscoped sub_group under division drill.
+	Returns (filters, drill_scope_ok).
+	"""
+	from erp_analysis.services.analytics_dimensions import DIMENSION_KEY_ALIASES
+
+	config = widget.get("config") or {}
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+	out = dict(parsed or {})
+
+	if not drill_path:
+		return out or None, True
+
+	depth = drill_depth
+	if depth is None:
+		depth = _resolve_effective_drill_depth(
+			widget,
+			drill_depth=None,
+			dimension=dimension,
+			parsed=out,
+			kwargs=kwargs,
+		)
+	if depth is None or int(depth) <= 0:
+		return out or None, True
+
+	depth = int(depth)
+	dim = (dimension or "").strip().lower()
+	if dim:
+		dim = DIMENSION_KEY_ALIASES.get(dim, dim)
+
+	for stack_key in ("drill_stack", "filter_stack", "drill_crumbs", "crumbs", "breadcrumb"):
+		stack = _parse_drill_stack(kwargs.get(stack_key) or frappe.form_dict.get(stack_key))
+		for key, values in stack.items():
+			k = DIMENSION_KEY_ALIASES.get((key or "").strip().lower(), (key or "").strip().lower())
+			out.setdefault(k, [])
+			for val in values:
+				if val not in out[k]:
+					out[k].append(val)
+
+	if not out.get("division") and out.get("channel"):
+		out["division"] = list(out["channel"])
+
+	division_names = _known_division_values(company)
+	wrong_keys = ("sub_group", "item_group", "group", "category")
+	for key in list(out.keys()):
+		k = (key or "").strip().lower()
+		if k in wrong_keys or k in division_names:
+			for val in list(out.get(key) or []):
+				text = str(val or "").strip()
+				if text in division_names and text not in (out.get("division") or []):
+					out.setdefault("division", []).append(text)
+			if k in wrong_keys and out.get("division"):
+				remaining = [v for v in out.get(key) or [] if str(v).strip() not in division_names]
+				if remaining:
+					out[key] = remaining
+				else:
+					out.pop(key, None)
+
+	for idx in range(min(depth, len(drill_path))):
+		parent_dim = DIMENSION_KEY_ALIASES.get(drill_path[idx], drill_path[idx])
+		if out.get(parent_dim):
+			continue
+		from erp_analysis.utils.rpc import get_arg
+
+		raw = get_arg(parent_dim, kwargs.get(parent_dim))
+		if raw is not None and str(raw).strip():
+			out.setdefault(parent_dim, []).append(str(raw).strip())
+
+	if not out.get("sub_group") and out.get("item_group"):
+		out["sub_group"] = list(out["item_group"])
+
+	from erp_analysis.services.analytics_sales import _coalesce_dashboard_filter_keys
+
+	out = _coalesce_dashboard_filter_keys(out)
+
+	missing: list[str] = []
+	if drill_path and drill_path[0] == "division" and depth >= 1 and not out.get("division"):
+		missing.append("division")
+	if (
+		drill_path
+		and len(drill_path) > 1
+		and drill_path[1] in ("sub_group", "item_group")
+		and depth >= 2
+		and not out.get("sub_group")
+	):
+		missing.append("sub_group")
+	if drill_path and drill_path[0] == "sales_order" and depth >= 2 and not out.get("sales_order"):
+		missing.append("sales_order")
+	if missing:
+		return out or None, False
+
+	return out or None, True
+
+
+def _merge_drill_filter_kwargs(
+	parsed: dict[str, list[Any]],
+	kwargs: dict[str, Any],
+) -> dict[str, list[Any]]:
+	"""Top-level drill params (mobile sometimes omits filters JSON)."""
+	from erp_analysis.utils.rpc import get_arg
+
+	out = dict(parsed or {})
+	single_keys = (
+		"division",
+		"channel",
+		"territory",
+		"brand",
+		"sub_group",
+		"item_group",
+		"salesperson",
+		"sales_order",
+	)
+	for key in single_keys:
+		raw = get_arg(key, kwargs.get(key))
+		if raw is None:
+			continue
+		values: list[Any]
+		if isinstance(raw, (list, tuple)):
+			values = list(raw)
+		else:
+			text = str(raw).strip()
+			if not text:
+				continue
+			values = [text]
+		cleaned = [v for v in values if v is not None and str(v).strip()]
+		if not cleaned:
+			continue
+		out.setdefault(key, [])
+		for val in cleaned:
+			if val not in out[key]:
+				out[key].append(val)
+	return out
+
+
+def _merge_widget_territory_params(
+	parsed: dict[str, list[Any]],
+	kwargs: dict[str, Any],
+) -> dict[str, list[Any]]:
+	from erp_analysis.utils.rpc import get_arg
+
+	out = dict(parsed or {})
+	territories_param = get_arg("territories", kwargs.get("territories"))
+	if territories_param:
+		if isinstance(territories_param, str):
+			extra = [t.strip() for t in territories_param.split(",") if t.strip()]
+		elif isinstance(territories_param, (list, tuple)):
+			extra = [str(t).strip() for t in territories_param if t is not None and str(t).strip()]
+		else:
+			extra = [str(territories_param).strip()]
+		out.setdefault("territory", [])
+		for item in extra:
+			if item not in out["territory"]:
+				out["territory"].append(item)
+
+	territory_param = get_arg("territory", kwargs.get("territory"))
+	if territory_param is not None:
+		text = str(territory_param).strip()
+		if text and text.lower() not in _TERRITORY_ALL_SENTINELS:
+			out.setdefault("territory", [])
+			if text not in out["territory"]:
+				out["territory"].append(text)
+	return out
+
+
+def _normalize_territory_filters(
+	user: str,
+	company: Optional[str],
+	parsed: dict[str, list[Any]],
+) -> dict[str, list[Any]]:
+	from erp_analysis.permissions.access_profile import resolve_territory_scope
+
+	out = dict(parsed or {})
+	if "territory" not in out:
+		return out
+
+	cleaned = _clean_territory_filter_values(out.get("territory") or [])
+	if not cleaned:
+		out.pop("territory", None)
+		return out
+
+	scoped = resolve_territory_scope(
+		requested_list=cleaned,
+		user=user,
+		company=company,
+		purpose="view",
+		module="sales",
+	)
+	out["territory"] = list(scoped) if scoped is not None else cleaned
+	return out
+
+
+def _resolve_board_filters(
+	user: str,
+	company: Optional[str],
+	kwargs: dict[str, Any],
+) -> tuple[Any, dict[str, list[Any]]]:
+	"""Parse batch `filters` / legacy `territory` param (mobile + PWA)."""
+	from erp_analysis.services.analytics_dimensions import (
+		normalize_division_slice_filters,
+		parse_logical_filters,
+		validate_logical_filters,
+	)
+	from erp_analysis.utils.rpc import get_arg
+
+	raw = get_arg("filters", kwargs.get("filters"))
+	territory = get_arg("territory", kwargs.get("territory"))
+	if raw is None and territory and str(territory).strip().lower() not in _TERRITORY_ALL_SENTINELS:
+		raw = {"territory": [str(territory).strip()]}
+	if raw is None and not get_arg("territories", kwargs.get("territories")):
+		return None, {}
+
+	parsed = parse_logical_filters(raw) if raw is not None else {}
+	parsed = normalize_division_slice_filters(user, company, parsed)
+	parsed = _merge_drill_filter_kwargs(parsed, kwargs)
+	parsed = _merge_widget_territory_params(parsed, kwargs)
+	parsed = _normalize_territory_filters(user, company, parsed)
+	if not parsed:
+		return None, {}
+	validate_logical_filters(user, company, parsed)
+	return parsed, parsed
+
+
+def _resolve_widget_filters(
+	user: str,
+	company: Optional[str],
+	filters: Any,
+	kwargs: dict[str, Any],
+) -> Any:
+	"""Single-widget drill/batch parity: territory params + All Territories sentinels."""
+	from erp_analysis.services.analytics_dimensions import (
+		normalize_division_slice_filters,
+		parse_logical_filters,
+		validate_logical_filters,
+	)
+	from erp_analysis.utils.rpc import get_arg
+
+	raw = filters
+	if raw is None:
+		raw = get_arg("filters", None) or get_arg("drill_filters", kwargs.get("drill_filters"))
+		if raw is None:
+			raw = get_arg("logical_filters", kwargs.get("logical_filters"))
+
+	parsed = parse_logical_filters(raw) if raw is not None else {}
+	parsed = normalize_division_slice_filters(user, company, parsed)
+	from erp_analysis.services.analytics_sales import _coalesce_dashboard_filter_keys
+
+	parsed = _coalesce_dashboard_filter_keys(parsed)
+	parsed = _merge_drill_filter_kwargs(parsed, kwargs)
+	parsed = _merge_widget_territory_params(parsed, kwargs)
+	parsed = _normalize_territory_filters(user, company, parsed)
+	if not parsed:
+		return None
+	validate_logical_filters(user, company, parsed)
+	return parsed
+
+
+def _board_period_from_kwargs(kwargs: dict[str, Any]) -> Optional[str]:
+	from erp_analysis.utils.rpc import get_arg
+
+	period = get_arg("period", kwargs.get("period"))
+	if not period:
+		return None
+	return str(period).strip().lower() or None
+
+
+def _apply_period_to_widget(widget: dict[str, Any], period: Optional[str]) -> dict[str, Any]:
+	if not period:
+		return widget
+	out = dict(widget)
+	out["period"] = period
+	config = dict(out.get("config") or {})
+	config["period"] = period
+	out["config"] = config
+	return out
+
+
+def _legacy_extra_from_filters(filters: Any) -> dict[str, Any]:
+	from erp_analysis.services.analytics_dimensions import parse_logical_filters
+
+	parsed = parse_logical_filters(filters)
+	territories = [
+		str(t).strip() for t in (parsed.get("territory") or []) if t is not None and str(t).strip()
+	]
+	if len(territories) == 1:
+		return {"territory": territories[0]}
+	return {}
+
+
+def _single_territory_filter(parsed_filters: dict[str, list[Any]]) -> bool:
+	territories = parsed_filters.get("territory") or []
+	return len(territories) == 1
+
+
 def clear_dashboard_board_cache() -> None:
 	frappe.cache().delete_keys("mobile_board_data:*")
+
+
+def _board_data_request_cache_suffix(
+	user: str,
+	company: Optional[str],
+	kwargs: dict[str, Any],
+	*,
+	batch_compare: Optional[str],
+) -> str:
+	"""Distinct Redis board payloads by compare mode and sales view scope."""
+	from erp_analysis.utils.rpc import to_bool
+
+	from erp_analysis.permissions.access_profile import get_view_overrides
+
+	show_ly = to_bool(kwargs.get("show_ly"), False)
+	compare = (kwargs.get("compare") or batch_compare or "").strip().lower()
+	if show_ly and not compare:
+		compare = "ly"
+	view_all = 0
+	try:
+		flags = get_view_overrides(user, company)
+		if flags.get("allow_view_all_sales"):
+			view_all = 1
+	except Exception:
+		pass
+	return f"ly:{int(show_ly)}:cmp:{compare or '-'}:va:{view_all}"
+
+
+def _warm_board_kpi_cache(
+	user: str,
+	company: Optional[str],
+	widgets: list[dict[str, Any]],
+	*,
+	board_period: Optional[str],
+	batch_compare: Optional[str],
+	filters: Any,
+	filters_key: str,
+	from_date: Optional[str],
+	to_date: Optional[str],
+) -> None:
+	"""Pre-fetch KPI payloads for this board (period + compare + filters aware)."""
+	from erp_analysis.access_context import has_module_access
+	from erp_analysis.services.kpi.home_metrics import get_home_kpi, is_home_kpi
+	from erp_analysis.services.module_kpis import get_module_kpi, is_module_kpi
+
+	for widget in widgets:
+		if (widget.get("widget_type") or "").upper() != "KPI":
+			continue
+		widget_for_build = _apply_period_to_widget(widget, board_period)
+		config = widget_for_build.get("config") or {}
+		metric = (widget_for_build.get("metric_key") or "net_sales").strip().lower()
+		module_key = (widget_for_build.get("module_key") or "").strip().lower()
+		period = _period_from_widget(widget_for_build, config)
+		compare = _compare_from_widget(widget_for_build, config, batch_compare)
+		if not module_key or not metric:
+			continue
+		if not has_module_access(module_key, user=user, company=company):
+			continue
+
+		is_gauge = _is_health_gauge_widget(widget_for_build, config, metric)
+		use_dashboard_kpi = _uses_dashboard_sales_kpi(
+			widget_for_build, config, user=user, company=company, filters=filters
+		)
+		cache_metric = f"{module_key}:{metric}" if module_key != "sales" else metric
+		if use_dashboard_kpi:
+			cache_metric = f"dashboard:{metric}"
+		if is_gauge:
+			cache_metric = f"health:{module_key}:{widget_for_build.get('key')}"
+
+		if get_cached_kpi(company, cache_metric, period, compare, filters_key) is not None:
+			continue
+
+		try:
+			if use_dashboard_kpi:
+				from erp_analysis.services.analytics_sales import get_dashboard_sales_kpi
+
+				kpi = get_dashboard_sales_kpi(
+					user=user,
+					company=company,
+					metric=metric,
+					from_date=from_date,
+					to_date=to_date,
+					period=period,
+					filters=filters_key,
+					compare=compare,
+				)
+			elif is_gauge or is_home_kpi(metric):
+				kpi = get_home_kpi(
+					user=user,
+					company=company,
+					metric_key=metric,
+					module_key=module_key,
+					widget_key=widget_for_build.get("key") or "",
+					period=period,
+					compare=compare,
+					from_date=from_date,
+					to_date=to_date,
+				)
+			elif is_module_kpi(module_key, metric):
+				kpi = get_module_kpi(
+					user=user,
+					company=company,
+					module_key=module_key,
+					metric_key=metric,
+					period=period,
+					filters=filters_key,
+				)
+			else:
+				continue
+		except Exception:
+			frappe.log_error(
+				title=f"warm_board_kpi.{widget_for_build.get('key')}",
+				message=frappe.get_traceback(),
+			)
+			continue
+		set_cached_kpi(company, cache_metric, period, compare, filters_key, kpi)
 
 
 def resolve_chart_dimension(
@@ -355,18 +1016,33 @@ def resolve_chart_dimension(
 	drill_depth: Optional[int] = None,
 ) -> tuple[str, dict[str, Any], Optional[int]]:
 	"""Pick group-by dimension from override, drill_path index, or widget default."""
+	from erp_analysis.services.analytics_dimensions import DIMENSION_KEY_ALIASES
+
 	config = widget.get("config") or {}
 	drill_path = _normalize_drill_path(config.get("drill_path"))
 
-	if dimension_override:
-		dim = dimension_override.strip().lower()
-		return dim, config, _depth_for_dimension(dim, drill_path)
+	def _norm_dim(raw: Optional[str]) -> Optional[str]:
+		if not raw:
+			return None
+		key = raw.strip().lower()
+		return DIMENSION_KEY_ALIASES.get(key, key)
 
+	# Prefer drill_path index when set — mobile often keeps a stale `dimension` from the prior step.
 	if drill_depth is not None and drill_path:
 		idx = int(drill_depth)
 		if idx < 0 or idx >= len(drill_path):
 			frappe.throw(_("drill_depth {0} is out of range for drill_path").format(idx), frappe.ValidationError)
-		return drill_path[idx], config, idx
+		path_dim = drill_path[idx]
+		override = _norm_dim(dimension_override)
+		if override and override == path_dim:
+			return override, config, idx
+		return path_dim, config, idx
+
+	if dimension_override:
+		dim = _norm_dim(dimension_override)
+		if not dim:
+			frappe.throw(_("Dimension is required"), frappe.ValidationError)
+		return dim, config, _depth_for_dimension(dim, drill_path)
 
 	default_dim = (widget.get("dimension_key") or "territory").strip().lower()
 	return default_dim, config, _depth_for_dimension(default_dim, drill_path)
@@ -494,10 +1170,10 @@ def resolve_widget_definition(
 	company: Optional[str] = None,
 ) -> dict[str, Any]:
 	"""Merge Mobile App Profile widget row with code defaults."""
-	key = (widget_key or "").strip()
-	if not key:
+	requested_key = (widget_key or "").strip()
+	if not requested_key:
 		frappe.throw(_("widget_key is required"), frappe.ValidationError)
-	key = WIDGET_KEY_ALIASES.get(key, key)
+	canonical_key = _canonical_widget_key(requested_key)
 
 	profile_name = resolve_mobile_app_profile_name(user=user, company=company)
 	row: dict[str, Any] = {}
@@ -506,14 +1182,19 @@ def resolve_widget_definition(
 		from erp_analysis.services.mobile_profile import get_profile_widgets
 
 		for widget in get_profile_widgets(profile_name):
-			if (widget.get("key") or "").strip() == key:
+			if (widget.get("key") or "").strip() == canonical_key:
 				row = widget
 				break
 
-	if not row and key not in WIDGET_DEFAULTS:
-		frappe.throw(_("Unknown dashboard widget: {0}").format(key), frappe.ValidationError)
+	if not row and canonical_key not in WIDGET_DEFAULTS:
+		frappe.throw(_("Unknown dashboard widget: {0}").format(requested_key), frappe.ValidationError)
 
-	return _merge_widget_definition(key, row)
+	merged = _merge_widget_definition(canonical_key, row)
+	if requested_key != canonical_key:
+		merged["key"] = requested_key
+		merged["requested_key"] = requested_key
+		merged["canonical_key"] = canonical_key
+	return merged
 
 
 def get_dashboard_widget_data(
@@ -543,13 +1224,50 @@ def get_dashboard_widget_data(
 	compare = compare or kwargs.get("compare")
 
 	widget = resolve_widget_definition(user, widget_key, company=company)
+	board_period = _board_period_from_kwargs(kwargs)
+	if board_period:
+		widget = _apply_period_to_widget(widget, board_period)
 	module_key = widget.get("module_key")
+	if (widget.get("key") or "") in (
+		"sales_orders_kpi",
+		"sales_open_orders_list",
+		"total_orders_kpi",
+		"total_orders",
+	):
+		module_key = "sales"
 	ctx = guard_mobile_api(
 		company=company,
 		module_key=module_key,
-		scope_module="sales" if module_key in ("sales", "sales_performance", "collection") else module_key,
+		scope_module="sales"
+		if module_key in ("sales", "sales_performance", "collection", "sales_orders", "sales_order")
+		else module_key,
 	)
 	company = ctx["company"]
+	filters = _resolve_widget_filters(user, company, filters, kwargs)
+	parsed_filters = filters if isinstance(filters, dict) else {}
+	if drill_depth is None:
+		inferred = _resolve_effective_drill_depth(
+			widget,
+			drill_depth=None,
+			dimension=dimension,
+			parsed=parsed_filters,
+			kwargs=kwargs,
+		)
+		if inferred is not None:
+			drill_depth = inferred
+	filters, drill_scope_ok = _normalize_drill_filters(
+		user,
+		company,
+		widget=widget,
+		drill_depth=drill_depth,
+		dimension=dimension,
+		parsed=parsed_filters,
+		kwargs=kwargs,
+	)
+	if filters:
+		from erp_analysis.services.analytics_dimensions import validate_logical_filters
+
+		validate_logical_filters(user, company, filters)
 
 	reset_batch_kpi_cache()
 	return _build_widget_payload(
@@ -563,7 +1281,7 @@ def get_dashboard_widget_data(
 		filters=filters,
 		drill_depth=drill_depth,
 		compare_override=compare,
-		extra=kwargs,
+		extra={**kwargs, "_drill_scope_ok": drill_scope_ok},
 	)
 
 
@@ -600,6 +1318,10 @@ def get_dashboard_board_data(
 			frappe.ValidationError,
 		)
 
+	ctx = guard_mobile_api(company=company)
+	user = ctx["user"]
+	company = ctx["company"]
+
 	resolved_widgets: list[dict[str, Any]] = []
 	for row in raw_widgets:
 		key = (row.get("key") or "").strip()
@@ -607,11 +1329,10 @@ def get_dashboard_board_data(
 			continue
 		widget = _merge_widget_definition(key, row)
 		module_key = widget.get("module_key")
-		guard_mobile_api(
-			company=company,
-			module_key=module_key,
-			scope_module="sales" if module_key in ("sales", "sales_performance", "collection") else module_key,
-		)
+		if module_key and not has_module_access(module_key, user=user, company=company):
+			continue
+		if (widget.get("config") or {}).get("hidden_on_board"):
+			continue
 		resolved_widgets.append(widget)
 
 	if not resolved_widgets:
@@ -625,9 +1346,22 @@ def get_dashboard_board_data(
 	access = _get_my_access(user=user, company=company)
 	effective_company = get_effective_company(user=user, requested=company, access=access)
 
+	board_filters, parsed_filters = _resolve_board_filters(user, effective_company, kwargs)
+	board_period = _board_period_from_kwargs(kwargs)
+	filters_key = _filters_cache_key(board_filters)
+
+	show_ly = to_bool(kwargs.get("show_ly"), False)
+	batch_compare = kwargs.get("compare")
+	if batch_compare is None and show_ly:
+		batch_compare = "ly"
+	request_suffix = _board_data_request_cache_suffix(
+		user, effective_company, kwargs, batch_compare=batch_compare
+	)
+
 	cache_key = (
 		f"mobile_board_data:v{BOARD_DATA_CACHE_VERSION}:{user}:{dashboard_id}:{effective_company or ''}:"
-		f"{limit}:{from_date or ''}:{to_date or ''}:{profile_modified}"
+		f"{limit}:{from_date or ''}:{to_date or ''}:{board_period or ''}:{filters_key}:"
+		f"{request_suffix}:{profile_modified}"
 	)
 	if use_cache and not refresh:
 		cached = frappe.cache().get_value(cache_key)
@@ -635,35 +1369,42 @@ def get_dashboard_board_data(
 			return cached
 
 	reset_batch_kpi_cache()
-	warm_batch_kpi_cache(user, effective_company, resolved_widgets)
-
-	show_ly = to_bool(kwargs.get("show_ly"), False)
-	batch_compare = kwargs.get("compare")
-	if batch_compare is None and show_ly:
-		batch_compare = "ly"
+	_warm_board_kpi_cache(
+		user,
+		effective_company,
+		resolved_widgets,
+		board_period=board_period,
+		batch_compare=batch_compare,
+		filters=board_filters,
+		filters_key=filters_key,
+		from_date=from_date,
+		to_date=to_date,
+	)
 
 	widgets_out: dict[str, Any] = {}
 	errors: dict[str, str] = {}
 	for widget in resolved_widgets:
 		key = widget["key"]
 		try:
+			widget_for_build = _apply_period_to_widget(widget, board_period)
 			payload = _build_widget_payload(
 				user,
 				effective_company,
-				widget,
+				widget_for_build,
 				from_date=from_date,
 				to_date=to_date,
 				limit=limit,
+				filters=board_filters,
 				compare_override=batch_compare,
 			)
 			payload = dict(payload)
 			alias_keys = payload.pop("_alias_keys", None) or []
-			_register_widget_payload_aliases(widgets_out, widget, payload)
+			_register_widget_payload_aliases(widgets_out, widget_for_build, payload)
 			for alias in alias_keys:
 				alias_key = str(alias).strip()
 				if alias_key:
 					widgets_out[alias_key] = payload
-			if key == "receivables_card":
+			if key == "receivables_card" and not _single_territory_filter(parsed_filters):
 				_register_receivables_territory_aliases(widgets_out, payload)
 		except Exception as exc:
 			errors[key] = str(exc)
@@ -676,6 +1417,7 @@ def get_dashboard_board_data(
 		"errors": errors or None,
 		"meta": {
 			"schema_version": 1,
+			"board_data_revision": BOARD_DATA_REVISION,
 			"widget_count": len(widgets_out),
 			"cached_at": datetime.utcnow().isoformat() + "Z",
 			"company": effective_company,
@@ -712,7 +1454,7 @@ def _build_widget_payload(
 	)
 
 	if widget.get("key") == "receivables_card":
-		return _receivables_card_widget_payload(user, company, widget, limit)
+		return _receivables_card_widget_payload(user, company, widget, limit, filters=filters)
 
 	if widget_type in NAV_WIDGET_TYPES:
 		return _link_widget_payload(widget)
@@ -738,6 +1480,7 @@ def _build_widget_payload(
 			filters=filters,
 			drill_depth=drill_depth,
 			compare_override=compare_override,
+			extra=extra,
 		)
 	if widget_type in CHART_WIDGET_TYPES or effective_view in ("pie", "donut", "bar", "line"):
 		return _chart_widget_payload(
@@ -1078,6 +1821,10 @@ def _resolve_kpi_module_key(widget: dict[str, Any], metric: str) -> str:
 		return "payables"
 	if metric in COLLECTION_KPI_METRICS:
 		return "collection"
+	from erp_analysis.services.module_kpis import SALES_ORDERS_KPI_METRICS
+
+	if widget_key in ("sales_orders_kpi", "total_orders_kpi", "total_orders") or metric in SALES_ORDERS_KPI_METRICS:
+		return "sales_orders"
 	return module_key
 
 
@@ -1086,6 +1833,36 @@ def _is_health_gauge_widget(widget: dict[str, Any], config: dict[str, Any], metr
 		return True
 	render_hint = (config.get("render_hint") or "").strip().lower()
 	return render_hint == "gauge"
+
+
+# Explicit payload field names for mobile KPI mapping (in addition to generic `value`).
+KPI_METRIC_PAYLOAD_FIELDS: dict[str, list[str]] = {
+	"inventory_value": ["inventory_value", "total_inventory_value"],
+	"value": ["inventory_value", "total_inventory_value"],
+	"stock_value": ["inventory_value", "total_inventory_value"],
+	"stock_qty": ["stock_qty", "total_qty", "totalQty"],
+	"total_qty": ["stock_qty", "total_qty", "totalQty"],
+	"available_value": ["available_value", "availableValue"],
+	"reserved_value": ["reserved_value", "reservedValue"],
+	"turnover": ["turnover", "inventory_turnover", "inventory_turnover_ratio", "inventoryTurnoverRatio"],
+	"inventory_turnover": ["turnover", "inventory_turnover", "inventory_turnover_ratio", "inventoryTurnoverRatio"],
+	"days_of_inventory": ["days_of_inventory", "days_of_cover", "avg_cover_days", "averageDaysInInventory"],
+	"avg_days": ["days_of_inventory", "days_of_cover", "avg_cover_days", "averageDaysInInventory"],
+	"days_of_cover": ["days_of_inventory", "days_of_cover", "avg_cover_days", "averageDaysInInventory"],
+	"net_sales": ["net_sales", "total_sales", "sales_ytd"],
+	"cogs": ["cogs", "cost_of_goods_sold", "cost_of_goods_sold_value"],
+	"cost_of_goods_sold": ["cogs", "cost_of_goods_sold", "cost_of_goods_sold_value"],
+	"gross_profit": ["gross_profit", "gp", "gross_profit_value"],
+	"gp_pct": ["gp_pct", "gross_profit_pct", "gp_margin"],
+	"gross_profit_pct": ["gp_pct", "gross_profit_pct", "gp_margin"],
+}
+
+
+def _metric_payload_fields(metric: str, value: Any) -> dict[str, Any]:
+	names = KPI_METRIC_PAYLOAD_FIELDS.get((metric or "").strip().lower())
+	if not names or value is None:
+		return {}
+	return {name: value for name in names}
 
 
 def _build_kpi_widget_response(
@@ -1118,6 +1895,10 @@ def _build_kpi_widget_response(
 	if kpi.get("label") or widget.get("label"):
 		kpi_entry["label"] = kpi.get("label") or widget.get("label")
 
+	metric_fields = _metric_payload_fields(metric, value)
+	if metric_fields:
+		kpi_entry.update(metric_fields)
+
 	result: dict[str, Any] = {
 		"widget_key": widget_key,
 		"widget_type": "KPI",
@@ -1134,12 +1915,15 @@ def _build_kpi_widget_response(
 			"format": format_hint,
 			"show_currency_symbol": bool(show_currency),
 			"subtitle": config.get("subtitle"),
+			**metric_fields,
 		},
 		"value": value,
+		**metric_fields,
 		"data": {
 			"value": value,
 			"format": format_hint,
 			"kpi_id": kpi_id,
+			**metric_fields,
 		},
 		"meta": {
 			"schema_version": 1,
@@ -1155,10 +1939,27 @@ def _build_kpi_widget_response(
 		result["section_title"] = config.get("section_title")
 	if config.get("row_group"):
 		result["row_group"] = config.get("row_group")
+	action = config.get("action")
+	if isinstance(action, dict) and action.get("type"):
+		result["action"] = action
+		result["meta"]["action"] = action
 	if show_ly:
 		result["show_ly"] = True
 	if is_gauge:
 		result["config"] = {"max_value": config.get("max_value") or 100}
+	else:
+		kpi_config: dict[str, Any] = {}
+		for key in (
+			"format",
+			"date_scope",
+			"drill_widget_key",
+			"drill_path",
+			"drill_views",
+		):
+			if config.get(key) is not None:
+				kpi_config[key] = config.get(key)
+		if kpi_config:
+			result["config"] = kpi_config
 	return result
 
 
@@ -1179,7 +1980,12 @@ def _kpi_widget_payload(
 	compare = _compare_from_widget(widget, config, compare_override)
 	filters_key = _filters_cache_key(filters)
 	is_gauge = _is_health_gauge_widget(widget, config, metric)
+	use_dashboard_kpi = _uses_dashboard_sales_kpi(
+		widget, config, user=user, company=company, filters=filters
+	)
 	cache_metric = f"{module_key}:{metric}" if module_key != "sales" else metric
+	if use_dashboard_kpi:
+		cache_metric = f"dashboard:{metric}"
 	if is_gauge:
 		cache_metric = f"health:{module_key}:{widget.get('key')}"
 
@@ -1188,7 +1994,33 @@ def _kpi_widget_payload(
 		from erp_analysis.services.kpi.home_metrics import get_home_kpi, is_home_kpi
 		from erp_analysis.services.module_kpis import get_module_kpi, is_module_kpi
 
-		if is_gauge or is_home_kpi(metric):
+		if use_dashboard_kpi:
+			from erp_analysis.services.analytics_sales import get_dashboard_sales_kpi
+
+			kpi = get_dashboard_sales_kpi(
+				user=user,
+				company=company,
+				metric=metric,
+				from_date=from_date,
+				to_date=to_date,
+				period=period,
+				filters=filters,
+				compare=compare,
+			)
+		elif _uses_filter_aware_sales_kpi(widget, metric, filters):
+			from erp_analysis.services.analytics_sales import get_sales_kpi
+
+			kpi = get_sales_kpi(
+				user=user,
+				company=company,
+				metric=metric,
+				from_date=from_date,
+				to_date=to_date,
+				period=period,
+				filters=filters,
+				compare=compare,
+			)
+		elif is_gauge or is_home_kpi(metric):
 			kpi = get_home_kpi(
 				user=user,
 				company=company,
@@ -1207,6 +2039,7 @@ def _kpi_widget_payload(
 				module_key=module_key,
 				metric_key=metric,
 				period=period,
+				filters=filters,
 			)
 		else:
 			from erp_analysis.services.analytics_sales import get_sales_kpi
@@ -1222,6 +2055,12 @@ def _kpi_widget_payload(
 				compare=compare,
 			)
 		set_cached_kpi(company, cache_metric, period, compare, filters_key, kpi)
+
+	widget_key = (widget.get("key") or "").strip()
+	if widget_key in ("sales_orders_kpi", "total_orders_kpi", "total_orders"):
+		from erp_analysis.services.sales_open_orders_widget import enrich_open_so_kpi_meta
+
+		kpi = enrich_open_so_kpi_meta(kpi, user=user, company=company, filters=filters)
 
 	format_hint = config.get("format") or kpi.get("meta", {}).get("format") or _default_format_for_metric(metric)
 	if is_gauge:
@@ -1239,6 +2078,44 @@ def _kpi_widget_payload(
 	)
 
 
+def _empty_drill_scope_payload(
+	widget: dict[str, Any],
+	dimension_override: Optional[str],
+	drill_depth: Optional[int],
+) -> dict[str, Any]:
+	config = widget.get("config") or {}
+	drill_path = _normalize_drill_path(config.get("drill_path"))
+	msg = _(
+		"Drill-down is missing a parent filter (for example division). "
+		"Pass filters={\"division\":[\"Retail\"]} with drill_depth."
+	)
+	result: dict[str, Any] = {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"table": {
+			"columns": _parse_table_columns(widget, compare=config.get("compare")),
+			"rows": [],
+			"metric": widget.get("metric_key") or "net_sales",
+			"dimension": dimension_override or widget.get("dimension_key"),
+			"filters": {},
+			"compare": config.get("compare"),
+			"show_currency_symbol": bool(widget.get("show_currency_symbol")),
+			"row_limit": config.get("row_limit"),
+		},
+		"rows": [],
+		"meta": {
+			"schema_version": 1,
+			"empty_state": "missing_drill_filter",
+			"empty_message": msg,
+			"drill_path": drill_path or None,
+			"drill_depth": drill_depth,
+			"missing_drill_filters": ["division"],
+		},
+	}
+	return result
+
+
 def _table_widget_payload(
 	user: str,
 	company: Optional[str],
@@ -1251,9 +2128,12 @@ def _table_widget_payload(
 	filters: Any = None,
 	drill_depth: Optional[int] = None,
 	compare_override: Optional[str] = None,
+	extra: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
 	config = widget.get("config") or {}
 	limit = _effective_widget_row_limit(widget, limit)
+	if extra is not None and extra.get("_drill_scope_ok") is False:
+		return _empty_drill_scope_payload(widget, dimension_override, drill_depth)
 	if _widget_data_source(config) == "attention":
 		return _attention_widget_payload(
 			user,
@@ -1276,7 +2156,18 @@ def _table_widget_payload(
 	if _widget_data_source(config) == "legacy_table":
 		return _legacy_table_widget_payload(user, company, widget, limit)
 	if _widget_data_source(config) == "legacy_chart" and widget["widget_type"] == "RANKING":
-		return _legacy_ranking_from_chart_payload(user, company, widget, limit)
+		return _legacy_ranking_from_chart_payload(user, company, widget, limit, filters=filters)
+	if _widget_data_source(config) == "open_sales_orders" or widget.get("key") == "sales_open_orders_list":
+		from erp_analysis.services.sales_open_orders_widget import build_open_sales_orders_widget_payload
+
+		return build_open_sales_orders_widget_payload(
+			user,
+			company,
+			widget,
+			limit=limit,
+			filters=filters,
+			drill_depth=drill_depth,
+		)
 
 	metric = widget.get("metric_key") or "net_sales"
 	dimension, config, resolved_depth = resolve_chart_dimension(
@@ -1339,19 +2230,48 @@ def _table_widget_payload(
 				}
 			)
 		else:
-			rows.append(
-				{
-					"dimension": row.get("label") or row.get("dimension_value"),
-					"dimension_value": row.get("dimension_value"),
-					"metric": row.get("metric_value"),
-					"metric_ly": row.get("metric_value_ly"),
-					"change_pct": row.get("change_pct"),
-					"rank": row.get("rank"),
-				}
-			)
+			entry = {
+				"dimension": row.get("label") or row.get("dimension_value"),
+				"dimension_value": row.get("dimension_value"),
+				"metric": row.get("metric_value"),
+				"metric_ly": row.get("metric_value_ly"),
+				"change_pct": row.get("change_pct"),
+				"rank": row.get("rank"),
+			}
+			if row.get("gp_pct") is not None:
+				entry["gp_pct"] = row.get("gp_pct")
+			if row.get("gross_profit") is not None:
+				entry["gross_profit"] = row.get("gross_profit")
+			rows.append(entry)
+
+	dim_key = (dimension or "").strip().lower()
+	if dim_key in ("sub_group", "item_group", "group"):
+		for entry in rows:
+			full = str(entry.get("dimension_value") or entry.get("dimension") or "").strip()
+			if not full:
+				continue
+			entry["dimension"] = full
+			entry["label"] = full
+			entry["name"] = full
+			entry["title"] = full
+			entry["sub_group"] = full
+			entry["item_group"] = full
+			entry["drill_filter"] = {"sub_group": [full]}
+
+	sub_group_label_meta: dict[str, Any] = {}
+	if dim_key in ("sub_group", "item_group", "group"):
+		sub_group_label_meta = {
+			"sub_group_label_display": "full",
+			"strip_division_prefix_from_sub_group": False,
+			"drill_row_label_field": "dimension_value",
+		}
 
 	columns = _parse_table_columns(widget, compare=compare_mode or False)
 	applied_filters = (analysis.get("meta") or {}).get("filters") or {}
+	from erp_analysis.services.analytics_sales import _coalesce_dashboard_filter_keys
+
+	if isinstance(applied_filters, dict):
+		applied_filters = _coalesce_dashboard_filter_keys(dict(applied_filters))
 	show_currency = widget.get("show_currency_symbol")
 	if show_currency is None:
 		show_currency = _is_currency_metric(metric)
@@ -1380,16 +2300,44 @@ def _table_widget_payload(
 			"next_dimension": next_dim,
 			"drillable": bool(next_dim),
 			"row_limit": limit,
+			"dimension_label": _dimension_display_label(user, company, dimension),
+			**sub_group_label_meta,
 		},
 	}
-	if config.get("section_title"):
+	if resolved_depth and int(resolved_depth) > 0:
+		result.pop("section_title", None)
+		result["meta"].pop("section_title", None)
+	elif config.get("section_title"):
 		result["section_title"] = config.get("section_title")
 		result["meta"]["section_title"] = config.get("section_title")
-	if widget["widget_type"] == "RANKING":
-		ranking_series = _legacy_ranking_series_from_table_rows(rows)
-		if ranking_series:
-			result["series"] = ranking_series
-			result["data"] = {"series": ranking_series, "rows": rows}
+	if not rows:
+		result["meta"]["empty_state"] = "no_rows"
+		result["meta"]["empty_message"] = _("No sales data for the selected filters.")
+	if (dimension or "").strip().lower() == "brand" and isinstance(applied_filters, dict) and rows:
+		from erp_analysis.services.sales_drill import assess_brand_drill_scope
+		from frappe.utils import getdate
+
+		analysis_meta = analysis.get("meta") or {}
+		scope = assess_brand_drill_scope(
+			company=company,
+			from_date=getdate(analysis_meta.get("from_date") or from_date or frappe.utils.nowdate()),
+			to_date=getdate(analysis_meta.get("to_date") or to_date or frappe.utils.nowdate()),
+			filters=applied_filters,
+			rows=rows,
+		)
+		result.update({k: scope[k] for k in ("drill_scope_status", "accept_response", "is_division_wide_brand_mix") if k in scope})
+		result["meta"].update(scope)
+	_mirror_table_rows_for_mobile_chart(
+		result,
+		rows,
+		metric=metric,
+		dimension=dimension,
+		applied_filters=applied_filters,
+		compare_mode=compare_mode,
+		show_currency=bool(show_currency),
+	)
+	# Mobile drill parsers often read payload.rows before table.rows
+	result["rows"] = rows
 	return result
 
 
@@ -1423,6 +2371,17 @@ def _chart_widget_payload(
 		return payload
 	if _widget_data_source(config) == "legacy_chart":
 		payload = _legacy_chart_widget_payload(
+			user,
+			company,
+			widget,
+			limit,
+			render_hint=render_hint,
+		)
+		if render_hint:
+			payload["meta"]["render_hint"] = render_hint
+		return payload
+	if _widget_data_source(config) == "legacy_table" and config.get("legacy_method"):
+		payload = _legacy_chart_from_table_payload(
 			user,
 			company,
 			widget,
@@ -1578,11 +2537,39 @@ def _apply_compare_point(point: dict[str, Any], row: dict[str, Any], compare_mod
 
 
 def _default_format_for_metric(metric: str) -> str:
-	if metric in ("transactions", "sales_qty", "customer_count", "active_customers"):
+	if metric in (
+		"transactions",
+		"sales_qty",
+		"customer_count",
+		"active_customers",
+		"stock_qty",
+		"total_qty",
+		"days_of_inventory",
+		"avg_days",
+		"days_of_cover",
+		"low_stock",
+		"low_stock_count",
+		"non_moving",
+		"non_moving_count",
+	):
 		return "integer"
 	if metric in ("gp_pct", "discount_pct"):
 		return "percent"
-	if metric in ("net_sales", "gross_sales", "average_transaction", "gross_profit", "discount_amount", "sales_return"):
+	if metric in ("turnover", "inventory_turnover"):
+		return "decimal"
+	if metric in (
+		"net_sales",
+		"gross_sales",
+		"average_transaction",
+		"gross_profit",
+		"discount_amount",
+		"sales_return",
+		"inventory_value",
+		"value",
+		"stock_value",
+		"available_value",
+		"reserved_value",
+	):
 		return "currency_compact"
 	return "number"
 
@@ -1595,6 +2582,11 @@ def _is_currency_metric(metric: str) -> bool:
 		"gross_profit",
 		"discount_amount",
 		"sales_return",
+		"inventory_value",
+		"value",
+		"stock_value",
+		"available_value",
+		"reserved_value",
 	)
 
 
@@ -1771,9 +2763,16 @@ def _receivables_card_widget_payload(
 	company: Optional[str],
 	widget: dict[str, Any],
 	limit: int,
+	*,
+	filters: Any = None,
 ) -> dict[str, Any]:
 	"""Territory breakdown cards for legacy/v2 receivables_card (series + kpis[])."""
 	config = dict(widget.get("config") or {})
+	legacy_extra = _legacy_extra_from_filters(filters)
+	if legacy_extra:
+		legacy_params = dict(config.get("legacy_params") or {})
+		legacy_params.update(legacy_extra)
+		config["legacy_params"] = legacy_params
 	config.setdefault("payload_source", "legacy_chart")
 	config.setdefault("legacy_method", widget.get("legacy_method") or "erp_analysis.receivables.get_receivables_dashboard")
 	config.setdefault("rows_key", "territory_totals")
@@ -1823,24 +2822,69 @@ def _receivables_card_widget_payload(
 	return result
 
 
+def _dimension_display_label(user: str, company: Optional[str], dimension_key: str) -> str:
+	from erp_analysis.services.analytics_dimensions import resolve_effective_dimension
+
+	try:
+		row = resolve_effective_dimension(user, company, dimension_key)
+		return str(row.get("label") or dimension_key)
+	except Exception:
+		return dimension_key.replace("_", " ").title()
+
+
+def _mirror_table_rows_for_mobile_chart(
+	result: dict[str, Any],
+	rows: list[dict[str, Any]],
+	*,
+	metric: str,
+	dimension: str,
+	applied_filters: dict[str, Any],
+	compare_mode: bool | str | None,
+	show_currency: bool,
+) -> None:
+	"""Drill/table payloads: mirror rows into chart.series for clients that only render charts."""
+	ranking_series = _legacy_ranking_series_from_table_rows(rows)
+	if not ranking_series:
+		return
+	result["series"] = ranking_series
+	result["data"] = {"series": ranking_series, "rows": rows}
+	result["chart"] = {
+		"series": ranking_series,
+		"metric": metric,
+		"dimension": dimension,
+		"filters": applied_filters,
+		"compare": compare_mode,
+		"compare_label": _compare_column_label(compare_mode),
+		"show_currency_symbol": show_currency,
+	}
+	meta = result.setdefault("meta", {})
+	meta["chart_mirrors_table"] = True
+
+
 def _legacy_ranking_series_from_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	series: list[dict[str, Any]] = []
 	for row in rows:
 		if not isinstance(row, dict):
 			continue
-		label = row.get("dimension") or row.get("label")
+		label = row.get("dimension_value") or row.get("dimension") or row.get("label")
 		value = row.get("metric")
 		if label is None:
 			continue
+		full = str(label)
 		entry: dict[str, Any] = {
-			"label": str(label),
+			"label": full,
+			"name": full,
 			"value": round(float(value or 0), 2),
-			"dimension_value": row.get("dimension_value") or str(label),
+			"dimension_value": row.get("dimension_value") or full,
 		}
 		if row.get("metric_ly") is not None:
 			entry["value_ly"] = row.get("metric_ly")
 		if row.get("change_pct") is not None:
 			entry["change_pct"] = row.get("change_pct")
+		if row.get("gp_pct") is not None:
+			entry["gp_pct"] = row.get("gp_pct")
+		if row.get("gross_profit") is not None:
+			entry["gross_profit"] = row.get("gross_profit")
 		if row.get("rank") is not None:
 			entry["rank"] = row.get("rank")
 		series.append(entry)
@@ -1866,19 +2910,30 @@ def _legacy_ranking_from_chart_payload(
 	company: Optional[str],
 	widget: dict[str, Any],
 	limit: int,
+	*,
+	filters: Any = None,
 ) -> dict[str, Any]:
 	"""Build RANKING table rows from a legacy chart API series (e.g. overdue customers)."""
-	config = widget.get("config") or {}
+	config = dict(widget.get("config") or {})
+	legacy_extra = _legacy_extra_from_filters(filters)
+	if legacy_extra:
+		legacy_params = dict(config.get("legacy_params") or {})
+		legacy_params.update(legacy_extra)
+		config["legacy_params"] = legacy_params
+	widget = {**widget, "config": config}
 	chart_payload = _legacy_chart_widget_payload(user, company, widget, limit)
 	series = chart_payload.get("series") or []
 	rows: list[dict[str, Any]] = []
 	for index, point in enumerate(series):
 		if not isinstance(point, dict):
 			continue
+		label = point.get("label") or point.get("dimension_value")
 		rows.append(
 			{
 				"rank": index + 1,
-				"dimension": point.get("label") or point.get("dimension_value"),
+				"dimension": label,
+				"dimension_value": point.get("dimension_value") or label,
+				"customer": point.get("customer") or point.get("dimension_value") or label,
 				"metric": point.get("value"),
 				"days": point.get("days") or point.get("days_overdue"),
 			}
@@ -1914,6 +2969,12 @@ def _legacy_ranking_from_chart_payload(
 			**(chart_payload.get("meta") or {}),
 		},
 	}
+	for meta_key in ("drill_path", "legacy_drill_method"):
+		if config.get(meta_key):
+			result["meta"][meta_key] = config.get(meta_key)
+	if config.get("legacy_drill_method"):
+		result["meta"]["drillable"] = True
+		result["meta"]["drill_method"] = config.get("legacy_drill_method")
 	if ranking_series:
 		result["chart"] = {
 			"series": ranking_series,
@@ -1923,6 +2984,69 @@ def _legacy_ranking_from_chart_payload(
 		result["series"] = ranking_series
 		result["data"]["series"] = ranking_series
 	return result
+
+
+def _legacy_chart_from_table_payload(
+	user: str,
+	company: Optional[str],
+	widget: dict[str, Any],
+	limit: int,
+	*,
+	render_hint: Optional[str] = None,
+) -> dict[str, Any]:
+	"""Build chart series from legacy API rows (e.g. inventory snapshot aging buckets)."""
+	config = widget.get("config") or {}
+	method_path = config.get("legacy_method") or widget.get("legacy_method")
+	if not method_path:
+		frappe.throw(
+			_("Widget {0} has no legacy_method configured").format(widget["key"]),
+			frappe.ValidationError,
+		)
+
+	payload = _call_legacy_method(
+		method_path,
+		company=company,
+		limit=limit,
+		extra=config.get("legacy_params"),
+	)
+	series_config = {
+		**config,
+		"rows_key": config.get("rows_key") or "rows",
+		"label_field": config.get("label_field") or "period",
+		"value_field": config.get("value_field") or "value",
+	}
+	series = _legacy_series_compat(_legacy_series_from_payload(payload, series_config))
+	metric = widget.get("metric_key") or config.get("metric") or "value"
+	dimension = config.get("dimension") or series_config.get("label_field") or "label"
+	show_currency = widget.get("show_currency_symbol")
+	if show_currency is None:
+		show_currency = True
+	hint = render_hint or widget["widget_type"].lower()
+	section_meta = _legacy_widget_section_meta(config)
+
+	return {
+		"widget_key": widget["key"],
+		"widget_type": widget["widget_type"],
+		"label": widget.get("label"),
+		"chart": {
+			"series": series,
+			"metric": metric,
+			"dimension": dimension,
+			"filters": {},
+			"show_currency_symbol": bool(show_currency),
+		},
+		"series": series,
+		"data": {"series": series},
+		"meta": {
+			"schema_version": 1,
+			"render_hint": hint,
+			"dimension": dimension,
+			"metric": metric,
+			"count": len(series),
+			"legacy_method": method_path,
+			**section_meta,
+		},
+	}
 
 
 def _legacy_chart_widget_payload(
@@ -2076,6 +3200,20 @@ def _legacy_table_widget_payload(
 	return result
 
 
+def _legacy_widget_cache_key(
+	widget_key: str,
+	company: Optional[str],
+	method_path: str,
+	from_date: Optional[str],
+	to_date: Optional[str],
+	limit: int,
+) -> str:
+	return (
+		f"mobile_legacy_widget:v{LEGACY_WIDGET_CACHE_VERSION}:{widget_key}:"
+		f"{company or ''}:{method_path}:{from_date or ''}:{to_date or ''}:{limit}"
+	)
+
+
 def _legacy_widget_payload(
 	user: str,
 	company: Optional[str],
@@ -2093,16 +3231,37 @@ def _legacy_widget_payload(
 			frappe.ValidationError,
 		)
 
-	payload = _call_legacy_method(
-		method_path,
-		company=company,
-		from_date=from_date,
-		to_date=to_date,
-		limit=limit,
-	)
+	widget_key = (widget.get("key") or "").strip()
+	legacy_cache_key = None
+	if widget_key in _LEGACY_WIDGET_CACHE_KEYS:
+		legacy_cache_key = _legacy_widget_cache_key(
+			widget_key, company, method_path, from_date, to_date, limit
+		)
+		cached = frappe.cache().get_value(legacy_cache_key)
+		if cached:
+			return cached
+
+	try:
+		payload = _call_legacy_method(
+			method_path,
+			company=company,
+			from_date=from_date,
+			to_date=to_date,
+			limit=limit,
+		)
+	except frappe.PermissionError:
+		if (widget.get("key") or "") == "home_recent_activities":
+			payload = {
+				"items": [],
+				"approvals": [],
+				"total_pending": 0,
+				"meta": {"schema_version": 1, "empty_reason": "approvals_not_permitted"},
+			}
+		else:
+			raise
 
 	section_meta = _legacy_widget_section_meta(config)
-	return {
+	result: dict[str, Any] = {
 		"widget_key": widget["key"],
 		"widget_type": widget.get("widget_type") or "LIST",
 		"label": widget.get("label"),
@@ -2114,3 +3273,23 @@ def _legacy_widget_payload(
 			**section_meta,
 		},
 	}
+	if widget.get("key") == "inventory_movement_insights" or "get_inventory_performance" in (method_path or ""):
+		rows: list[dict[str, Any]] = []
+		for item in (payload.get("fastMovingItems") or [])[: int(config.get("row_limit") or limit or 5)]:
+			if not isinstance(item, dict):
+				continue
+			rows.append(
+				{
+					"label": item.get("itemName") or item.get("itemCode"),
+					"value": float(item.get("value") or 0),
+					"quantity": float(item.get("quantity") or 0),
+					"item_code": item.get("itemCode"),
+				}
+			)
+		series = [{"label": r["label"], "value": r["value"]} for r in rows if r.get("label")]
+		result["rows"] = rows
+		result["series"] = series
+		result["meta"]["data_kind"] = "inventory_movement"
+	if legacy_cache_key:
+		frappe.cache().set_value(legacy_cache_key, result, expires_in_sec=LEGACY_WIDGET_CACHE_TTL)
+	return result

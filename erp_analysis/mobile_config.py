@@ -47,10 +47,15 @@ KNOWN_API_METHODS = (
 	"get_executive_dashboard",
 	"get_collection_dashboard",
 	"get_collection_attention",
+	"get_customer_advances",
+	"get_customer_advances_customers_chart",
 	"get_salesperson_ranking",
 	"get_salesperson_performance",
 	"get_product_ranking",
 	"get_product_performance",
+	"get_sales_by_division_drill",
+	"get_item_stock_by_code",
+	"get_item_sales_qty",
 	"get_order_book_dashboard",
 	"get_open_sales_orders",
 	"get_payables_dashboard",
@@ -82,6 +87,7 @@ KNOWN_API_METHODS = (
 	"get_receivables_overdue_trend_chart",
 	"get_receivables_attention",
 	"get_territory_receivables",
+	"get_territory_receivables_list",
 	"get_customer_statement",
 	"get_inventory_snapshot",
 	"get_inventory_performance",
@@ -99,6 +105,8 @@ KNOWN_API_METHODS = (
 	"get_catalogue_pages",
 	"get_catalogue_flip_url",
 	"send_statement_pdf",
+	"get_statement_pdf",
+	"get_statement_branding",
 )
 
 DEFAULT_DASHBOARDS = [

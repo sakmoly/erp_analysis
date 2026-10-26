@@ -93,39 +93,318 @@ def _safe_customer_shell(customer_id: str) -> dict[str, Any]:
 		return {"id": customer_id, "customer_name": customer_id, "territory": ""}
 
 
+def _sdb_customer_columns() -> set[str]:
+	if not frappe.db.table_exists("SalesDashBoard"):
+		return set()
+	try:
+		return {c["Field"] for c in frappe.db.sql("SHOW COLUMNS FROM `tabSalesDashBoard`", as_dict=True)}
+	except Exception:
+		return set()
+
+
+def _sdb_customer_scope_sql(
+	customer: str,
+	invoice_col: str = "Invoice_No",
+) -> tuple[str, list[Any]]:
+	"""SDB.Customer stores customer_name (label); scope by Sales Invoice link id."""
+	return (
+		f" AND `{invoice_col}` IN ("
+		f"SELECT name FROM `tabSales Invoice` WHERE customer = %s AND docstatus = 1)",
+		[customer],
+	)
+
+
+def _customer_net_and_cogs(
+	company: str,
+	customer: str,
+	from_date: date,
+	to_date: date,
+) -> tuple[float, float]:
+	"""Net sales + COGS for one customer (SalesDashBoard / Printechs GP, else submitted SI)."""
+	cols = _sdb_customer_columns()
+	if cols and "Invoice_No" in cols:
+		company_sql = ""
+		params: list[Any] = [from_date, to_date]
+		if company and "Company" in cols:
+			company_sql = " AND `Company` = %s"
+			params.append(company)
+		elif company and "company" in cols:
+			company_sql = " AND company = %s"
+			params.append(company)
+		cust_sql, cust_params = _sdb_customer_scope_sql(customer)
+		params.extend(cust_params)
+
+		sales_col = "Net_Amount" if "Net_Amount" in cols else "net_amount"
+		cogs_col = "COGS" if "COGS" in cols else "cogs"
+		date_col = "Invoice_Date" if "Invoice_Date" in cols else "invoice_date"
+		if sales_col in cols and date_col in cols:
+			row = frappe.db.sql(
+				f"""
+				SELECT
+					COALESCE(SUM(`{sales_col}`), 0) AS net_sales,
+					COALESCE(SUM(`{cogs_col}`), 0) AS cogs
+				FROM `tabSalesDashBoard`
+				WHERE `{date_col}` BETWEEN %s AND %s
+				  {company_sql}
+				  {cust_sql}
+				""",
+				tuple(params),
+				as_dict=True,
+			)
+			if row:
+				net_sales = float(row[0].net_sales or 0)
+				cogs = float(row[0].cogs or 0)
+				if net_sales > 0 or cogs > 0:
+					return net_sales, cogs
+
+	params_si: list[Any] = [from_date, to_date, customer]
+	company_sql = ""
+	if company:
+		company_sql = " AND si.company = %s"
+		params_si.append(company)
+
+	sales_row = frappe.db.sql(
+		f"""
+		SELECT COALESCE(SUM(si.base_net_total), 0) AS net_sales
+		FROM `tabSales Invoice` si
+		WHERE si.docstatus = 1
+		  AND si.posting_date BETWEEN %s AND %s
+		  AND si.customer = %s
+		  {company_sql}
+		""",
+		tuple(params_si),
+		as_dict=True,
+	)[0]
+	net_sales = float(sales_row.net_sales or 0)
+
+	cogs_params: list[Any] = [from_date, to_date, customer]
+	cogs_company_sql = ""
+	if company:
+		cogs_company_sql = " AND si.company = %s"
+		cogs_params.append(company)
+	cogs_row = frappe.db.sql(
+		f"""
+		SELECT COALESCE(SUM(
+			CASE WHEN sle.stock_value_difference < 0 THEN -sle.stock_value_difference ELSE 0 END
+		), 0) AS cogs
+		FROM `tabStock Ledger Entry` sle
+		INNER JOIN `tabSales Invoice` si ON si.name = sle.voucher_no
+		WHERE sle.voucher_type = 'Sales Invoice'
+		  AND sle.is_cancelled = 0
+		  AND sle.posting_date BETWEEN %s AND %s
+		  AND si.docstatus = 1
+		  AND si.customer = %s
+		  {cogs_company_sql}
+		""",
+		tuple(cogs_params),
+		as_dict=True,
+	)[0]
+	cogs = float(cogs_row.cogs or 0)
+	return net_sales, cogs
+
+
+def _customer_distinct_invoice_count(
+	company: str,
+	customer: str,
+	from_date: date,
+	to_date: date,
+) -> int:
+	cols = _sdb_customer_columns()
+	if cols and "Invoice_No" in cols:
+		company_sql = ""
+		params: list[Any] = [from_date, to_date]
+		if company and "Company" in cols:
+			company_sql = " AND `Company` = %s"
+			params.append(company)
+		elif company and "company" in cols:
+			company_sql = " AND company = %s"
+			params.append(company)
+		cust_sql, cust_params = _sdb_customer_scope_sql(customer)
+		params.extend(cust_params)
+		date_col = "Invoice_Date" if "Invoice_Date" in cols else "invoice_date"
+		row = frappe.db.sql(
+			f"""
+			SELECT COUNT(DISTINCT `Invoice_No`) AS cnt
+			FROM `tabSalesDashBoard`
+			WHERE `{date_col}` BETWEEN %s AND %s
+			  AND IFNULL(`Invoice_No`, '') != ''
+			  {company_sql}
+			  {cust_sql}
+			""",
+			tuple(params),
+			as_dict=True,
+		)
+		if row and int(row[0].cnt or 0) > 0:
+			return int(row[0].cnt)
+
+	params_si: list[Any] = [from_date, to_date, customer]
+	company_sql = ""
+	if company:
+		company_sql = " AND si.company = %s"
+		params_si.append(company)
+	row = frappe.db.sql(
+		f"""
+		SELECT COUNT(DISTINCT si.name) AS cnt
+		FROM `tabSales Invoice` si
+		WHERE si.docstatus = 1
+		  AND si.is_return = 0
+		  AND si.posting_date BETWEEN %s AND %s
+		  AND si.customer = %s
+		  {company_sql}
+		""",
+		tuple(params_si),
+		as_dict=True,
+	)[0]
+	return int(row.cnt or 0)
+
+
+def get_customer_sales_block(
+	company: Optional[str] = None,
+	customer: Optional[str] = None,
+	as_of: Optional[str] = None,
+) -> dict[str, Any]:
+	"""Submitted-invoice net sales + GP (desk-aligned via SalesDashBoard when available)."""
+	company = company or frappe.defaults.get_user_default("Company")
+	empty = {
+		"today": 0.0,
+		"mtd": 0.0,
+		"ytd": 0.0,
+		"gp": 0.0,
+		"gp_pct": 0.0,
+		"avg_invoice": 0.0,
+		"last_invoice_date": None,
+	}
+	if not company or not customer:
+		return empty
+
+	end = getdate(as_of or nowdate())
+	today = getdate(nowdate())
+	mtd_start = get_first_day(end)
+	ytd_start = date(end.year, 1, 1)
+
+	today_net, _ = _customer_net_and_cogs(company, customer, today, today)
+	mtd_net, mtd_cogs = _customer_net_and_cogs(company, customer, mtd_start, end)
+	ytd_net, ytd_cogs = _customer_net_and_cogs(company, customer, ytd_start, end)
+
+	ytd_gp = round(ytd_net - ytd_cogs, 2)
+	gp_pct = round(ytd_gp / ytd_net * 100, 2) if ytd_net > 0 else 0.0
+	inv_count = _customer_distinct_invoice_count(company, customer, ytd_start, end)
+	avg_invoice = round(ytd_net / inv_count, 2) if inv_count > 0 else 0.0
+
+	last_inv = frappe.db.sql(
+		"""
+		SELECT MAX(si.posting_date) AS last_date
+		FROM `tabSales Invoice` si
+		WHERE si.docstatus = 1
+		  AND si.company = %s
+		  AND si.customer = %s
+		""",
+		(company, customer),
+		as_dict=True,
+	)[0].last_date
+
+	return {
+		"today": round(today_net, 2),
+		"mtd": round(mtd_net, 2),
+		"ytd": round(ytd_net, 2),
+		"gp": ytd_gp,
+		"gp_pct": gp_pct,
+		"avg_invoice": avg_invoice,
+		"last_invoice_date": str(last_inv) if last_inv else None,
+	}
+
+
+def _months_elapsed_ytd(as_of: date) -> int:
+	"""Calendar months elapsed in as_of year (Jan = 1 … current month)."""
+	return max(1, int(getdate(as_of).month))
+
+
+def _customer_ytd_gross_sales(
+	company: str,
+	customer: str,
+	from_date: date,
+	to_date: date,
+) -> float:
+	"""Submitted invoice grand total (incl. VAT) — aligns with customer payments."""
+	row = frappe.db.sql(
+		"""
+		SELECT COALESCE(SUM(si.base_grand_total), 0) AS total
+		FROM `tabSales Invoice` si
+		WHERE si.docstatus = 1
+		  AND si.company = %s
+		  AND si.customer = %s
+		  AND si.posting_date BETWEEN %s AND %s
+		""",
+		(company, customer, from_date, to_date),
+		as_dict=True,
+	)[0]
+	return float(row.total or 0)
+
+
+def _customer_ytd_collections(
+	company: str,
+	customer: str,
+	from_date: date,
+	to_date: date,
+) -> float:
+	row = frappe.db.sql(
+		"""
+		SELECT COALESCE(SUM(pe.paid_amount), 0) AS total
+		FROM `tabPayment Entry` pe
+		WHERE pe.docstatus = 1
+		  AND pe.payment_type = 'Receive'
+		  AND pe.party_type = 'Customer'
+		  AND pe.party = %s
+		  AND pe.company = %s
+		  AND pe.posting_date BETWEEN %s AND %s
+		""",
+		(customer, company, from_date, to_date),
+		as_dict=True,
+	)[0]
+	return float(row.total or 0)
+
+
 def get_customer_receivables_block(
 	company: Optional[str] = None,
 	customer: Optional[str] = None,
 	chart_months: int = CHART_MONTHS,
+	*,
+	as_of: Optional[date] = None,
+	ytd_sales: Optional[float] = None,
+	ytd_collections: Optional[float] = None,
+	months_elapsed: Optional[int] = None,
 ) -> dict[str, Any]:
-	"""Receivables KPIs for Customer 360 (outstanding / overdue / current + averages)."""
+	"""Receivables KPIs for Customer 360 (outstanding / overdue / current + YTD averages)."""
 	company = company or frappe.defaults.get_user_default("Company")
 	empty = {
 		"outstanding": 0.0,
 		"overdue": 0.0,
 		"current": 0.0,
 		"avg_monthly_sales": 0.0,
+		"avg_monthly_paid": 0.0,
 		"monthly_receivable": 0.0,
 		"oldest_invoice": None,
 	}
 	if not company or not customer:
 		return empty
 
+	as_of = getdate(as_of or nowdate())
 	row = frappe.db.sql(
 		"""
 		SELECT
 			COALESCE(SUM(si.outstanding_amount), 0) AS outstanding,
 			COALESCE(SUM(
-				CASE WHEN si.due_date < CURDATE() THEN si.outstanding_amount ELSE 0 END
+				CASE WHEN COALESCE(si.due_date, si.posting_date) < %s
+				THEN si.outstanding_amount ELSE 0 END
 			), 0) AS overdue,
 			MIN(CASE WHEN si.outstanding_amount > 0 THEN si.posting_date END) AS oldest_invoice
 		FROM `tabSales Invoice` si
 		WHERE si.docstatus = 1
-		  AND si.outstanding_amount > 0
+		  AND si.outstanding_amount != 0
 		  AND si.company = %s
 		  AND si.customer = %s
 		""",
-		(company, customer),
+		(as_of, company, customer),
 		as_dict=True,
 	)[0]
 
@@ -133,12 +412,16 @@ def get_customer_receivables_block(
 	overdue = round(float(row.overdue or 0), 2)
 	current = round(max(outstanding - overdue, 0.0), 2)
 
-	charts = get_customer_charts(company=company, customer=customer, months=chart_months)
-	sales_vals = charts.get("sales") or []
-	receivable_vals = charts.get("receivables") or []
+	months = months_elapsed or _months_elapsed_ytd(as_of)
+	ytd_start = date(as_of.year, 1, 1)
+	if ytd_sales is None:
+		ytd_sales = _customer_ytd_gross_sales(company, customer, ytd_start, as_of)
+	if ytd_collections is None:
+		ytd_collections = _customer_ytd_collections(company, customer, ytd_start, as_of)
 
-	avg_monthly_sales = round(sum(sales_vals) / len(sales_vals), 2) if sales_vals else 0.0
-	monthly_receivable = round(sum(receivable_vals) / len(receivable_vals), 2) if receivable_vals else 0.0
+	# Avg monthly sales: YTD invoice total incl. VAT (same basis as collections / trend table).
+	avg_monthly_sales = round(float(ytd_sales or 0) / months, 2) if months else 0.0
+	avg_monthly_paid = round(float(ytd_collections or 0) / months, 2) if months else 0.0
 
 	oldest = row.oldest_invoice
 	return {
@@ -146,7 +429,8 @@ def get_customer_receivables_block(
 		"overdue": overdue,
 		"current": current,
 		"avg_monthly_sales": avg_monthly_sales,
-		"monthly_receivable": monthly_receivable,
+		"avg_monthly_paid": avg_monthly_paid,
+		"monthly_receivable": avg_monthly_paid,
 		"oldest_invoice": str(oldest) if oldest else None,
 	}
 
@@ -163,30 +447,35 @@ def _month_periods(end_date: date, count: int) -> list[tuple[date, date, str]]:
 	return periods
 
 
-def get_customer_charts(
-	company: Optional[str] = None,
-	customer: Optional[str] = None,
-	months: int = CHART_MONTHS,
-) -> dict[str, Any]:
-	"""Monthly sales, collection, and month-end receivable series for charts."""
-	company = company or frappe.defaults.get_user_default("Company")
-	if not company or not customer:
-		return {"months": [], "sales": [], "collection": [], "receivables": []}
+def _ytd_month_periods(as_of: date) -> list[tuple[date, date, str]]:
+	"""Calendar months from Jan through as_of month (desk YTD trend)."""
+	as_of = getdate(as_of)
+	periods: list[tuple[date, date, str]] = []
+	cursor = date(as_of.year, 1, 1)
+	while cursor.year == as_of.year and cursor.month <= as_of.month:
+		month_start = getdate(get_first_day(cursor))
+		month_end = getdate(get_last_day(month_start))
+		if month_end > as_of:
+			month_end = as_of
+		periods.append((month_start, month_end, month_abbr[month_start.month]))
+		cursor = getdate(add_months(get_first_day(month_start), 1))
+	return periods
 
-	end = getdate(nowdate())
-	periods = _month_periods(end, months)
-	if not periods:
-		return {"months": [], "sales": [], "collection": [], "receivables": []}
 
-	range_start = periods[0][0]
-	range_end = periods[-1][1]
-
-	sales_rows = frappe.db.sql(
+def _customer_monthly_sales_maps(
+	company: str,
+	customer: str,
+	range_start: date,
+	range_end: date,
+) -> tuple[dict[tuple[int, int], float], dict[tuple[int, int], float]]:
+	"""Net (desk GP / KPI) and gross (invoice total inc. VAT) by calendar month."""
+	si_rows = frappe.db.sql(
 		"""
 		SELECT
 			YEAR(si.posting_date) AS y,
 			MONTH(si.posting_date) AS m,
-			COALESCE(SUM(si.base_grand_total), 0) AS sales
+			COALESCE(SUM(si.base_net_total), 0) AS net_sales,
+			COALESCE(SUM(si.base_grand_total), 0) AS gross_sales
 		FROM `tabSales Invoice` si
 		WHERE si.docstatus = 1
 		  AND si.company = %s
@@ -197,16 +486,104 @@ def get_customer_charts(
 		(company, customer, range_start, range_end),
 		as_dict=True,
 	)
-	sales_map = {(int(r.y), int(r.m)): float(r.sales or 0) for r in sales_rows}
+	si_net = {(int(r.y), int(r.m)): float(r.net_sales or 0) for r in si_rows}
+	si_gross = {(int(r.y), int(r.m)): float(r.gross_sales or 0) for r in si_rows}
+
+	net_map = dict(si_net)
+	gross_map = dict(si_gross)
+
+	cols = _sdb_customer_columns()
+	if cols and "Invoice_No" in cols and "Net_Amount" in cols:
+		date_col = "Invoice_Date" if "Invoice_Date" in cols else "invoice_date"
+		sales_col = "Net_Amount" if "Net_Amount" in cols else "net_amount"
+		gross_col = "Gross_Amount" if "Gross_Amount" in cols else None
+		company_sql = ""
+		params: list[Any] = [range_start, range_end]
+		if company and "Company" in cols:
+			company_sql = " AND `Company` = %s"
+			params.append(company)
+		cust_sql, cust_params = _sdb_customer_scope_sql(customer)
+		params.extend(cust_params)
+		gross_sel = (
+			f", COALESCE(SUM(`{gross_col}`), 0) AS gross_sales"
+			if gross_col and gross_col in cols
+			else ", 0 AS gross_sales"
+		)
+		sdb_rows = frappe.db.sql(
+			f"""
+			SELECT
+				YEAR(`{date_col}`) AS y,
+				MONTH(`{date_col}`) AS m,
+				COALESCE(SUM(`{sales_col}`), 0) AS net_sales
+				{gross_sel}
+			FROM `tabSalesDashBoard`
+			WHERE `{date_col}` BETWEEN %s AND %s
+			  {company_sql}
+			  {cust_sql}
+			GROUP BY YEAR(`{date_col}`), MONTH(`{date_col}`)
+			""",
+			tuple(params),
+			as_dict=True,
+		)
+		for r in sdb_rows:
+			key = (int(r.y), int(r.m))
+			net_map[key] = float(r.net_sales or 0)
+
+	# Invoice total (incl. VAT) always from submitted Sales Invoices.
+	return net_map, gross_map
+
+
+def get_customer_charts(
+	company: Optional[str] = None,
+	customer: Optional[str] = None,
+	months: int = CHART_MONTHS,
+	*,
+	as_of: Optional[date] = None,
+	ytd: bool = True,
+	include_receivable_series: bool = False,
+) -> dict[str, Any]:
+	"""Monthly sales and collection series (YTD Jan→report month by default)."""
+	company = company or frappe.defaults.get_user_default("Company")
+	empty: dict[str, Any] = {
+		"months": [],
+		"sales": [],
+		"sales_net": [],
+		"sales_gross": [],
+		"collection": [],
+		"receivables": [],
+		"sales_ly": [],
+		"sales_growth_pct": [],
+		"meta": {
+			"sales_basis": "invoice_grand_total",
+			"collection_basis": "payment_posting_date",
+		},
+	}
+	if not company or not customer:
+		return empty
+
+	end = getdate(as_of or nowdate())
+	periods = _ytd_month_periods(end) if ytd else _month_periods(end, months)
+	if not periods:
+		return empty
+
+	range_start = periods[0][0]
+	range_end = periods[-1][1]
+
+	net_map, gross_map = _customer_monthly_sales_maps(company, customer, range_start, range_end)
+
+	ly_start = date(end.year - 1, 1, 1)
+	ly_end = date(end.year - 1, end.month, end.day)
+	if end.month == 2 and end.day == 29:
+		ly_end = date(end.year - 1, 2, 28)
+	_, ly_gross_map = _customer_monthly_sales_maps(company, customer, ly_start, ly_end)
 
 	collection_rows = frappe.db.sql(
 		"""
 		SELECT
 			YEAR(pe.posting_date) AS y,
 			MONTH(pe.posting_date) AS m,
-			COALESCE(SUM(per.allocated_amount), 0) AS collected
+			COALESCE(SUM(pe.paid_amount), 0) AS collected
 		FROM `tabPayment Entry` pe
-		INNER JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
 		WHERE pe.docstatus = 1
 		  AND pe.payment_type = 'Receive'
 		  AND pe.party_type = 'Customer'
@@ -222,23 +599,49 @@ def get_customer_charts(
 
 	months_labels: list[str] = []
 	sales: list[float] = []
+	sales_net: list[float] = []
+	sales_gross: list[float] = []
 	collection: list[float] = []
 	receivables: list[float] = []
+	sales_ly: list[float] = []
+	sales_growth_pct: list[float | None] = []
 
 	for month_start, month_end, label in periods:
 		key = (month_start.year, month_start.month)
+		ly_key = (end.year - 1, month_start.month)
+		cur_net = round(net_map.get(key, 0.0), 2)
+		cur_gross = round(gross_map.get(key, 0.0), 2)
+		ly = round(ly_gross_map.get(ly_key, 0.0), 2)
 		months_labels.append(label)
-		sales.append(round(sales_map.get(key, 0.0), 2))
+		sales.append(cur_gross)
+		sales_net.append(cur_net)
+		sales_gross.append(cur_gross)
 		collection.append(round(collection_map.get(key, 0.0), 2))
-		receivables.append(
-			round(_receivable_as_of(company, customer, month_end), 2)
-		)
+		sales_ly.append(ly)
+		if ly > 0:
+			sales_growth_pct.append(round((cur_gross - ly) / ly * 100, 1))
+		else:
+			sales_growth_pct.append(None)
+		if include_receivable_series:
+			receivables.append(
+				round(_receivable_as_of(company, customer, month_end), 2)
+			)
 
 	return {
 		"months": months_labels,
 		"sales": sales,
+		"sales_net": sales_net,
+		"sales_gross": sales_gross,
 		"collection": collection,
 		"receivables": receivables,
+		"sales_ly": sales_ly,
+		"sales_growth_pct": sales_growth_pct,
+		"meta": {
+			"sales_basis": "invoice_grand_total",
+			"sales_net_basis": "net_ex_vat",
+			"collection_basis": "payment_posting_date",
+			"year": end.year,
+		},
 	}
 
 
@@ -334,6 +737,7 @@ def get_statement_link(
 			"to_date": to_date,
 		},
 		"pdf_method": "erp_analysis.customer_notifications.send_statement_pdf",
+		"pdf_share_method": "erp_analysis.customer_notifications.get_statement_pdf",
 	}
 
 
@@ -350,8 +754,29 @@ def get_customer_360_payload(
 	if not customer_id:
 		frappe.throw("Customer is required", frappe.MandatoryError)
 
-	receivables = get_customer_receivables_block(company=company, customer=customer_id)
-	charts = get_customer_charts(company=company, customer=customer_id)
+	as_of_dt = getdate(to_date or nowdate())
+	ytd_start = date(as_of_dt.year, 1, 1)
+	months_elapsed = _months_elapsed_ytd(as_of_dt)
+
+	sales = get_customer_sales_block(company=company, customer=customer_id, as_of=str(as_of_dt))
+	ytd_gross = _customer_ytd_gross_sales(company, customer_id, ytd_start, as_of_dt)
+	ytd_collections = _customer_ytd_collections(company, customer_id, ytd_start, as_of_dt)
+
+	receivables = get_customer_receivables_block(
+		company=company,
+		customer=customer_id,
+		as_of=as_of_dt,
+		ytd_sales=ytd_gross,
+		ytd_collections=ytd_collections,
+		months_elapsed=months_elapsed,
+	)
+	charts = get_customer_charts(
+		company=company,
+		customer=customer_id,
+		as_of=as_of_dt,
+		ytd=True,
+		include_receivable_series=False,
+	)
 	recent_invoices = get_recent_invoices(company=company, customer=customer_id, limit=invoice_limit)
 	open_orders = get_open_sales_orders(
 		company=company,
@@ -363,6 +788,7 @@ def get_customer_360_payload(
 	return {
 		"customer": get_customer_object(customer_id),
 		"company": company,
+		"sales": sales,
 		"receivables": receivables,
 		"charts": charts,
 		"recent_invoices": recent_invoices,
@@ -390,6 +816,7 @@ def empty_customer_360_payload(
 		"from_date": from_date,
 		"to_date": to_date,
 		"pdf_method": "erp_analysis.customer_notifications.send_statement_pdf",
+		"pdf_share_method": "erp_analysis.customer_notifications.get_statement_pdf",
 	}
 	try:
 		statement = get_statement_link(
@@ -407,15 +834,34 @@ def empty_customer_360_payload(
 	return {
 		"customer": _safe_customer_shell(customer_id),
 		"company": company,
+		"sales": {
+			"today": 0.0,
+			"mtd": 0.0,
+			"ytd": 0.0,
+			"gp": 0.0,
+			"gp_pct": 0.0,
+			"avg_invoice": 0.0,
+			"last_invoice_date": None,
+		},
 		"receivables": {
 			"outstanding": 0.0,
 			"overdue": 0.0,
 			"current": 0.0,
 			"avg_monthly_sales": 0.0,
+			"avg_monthly_paid": 0.0,
 			"monthly_receivable": 0.0,
 			"oldest_invoice": None,
 		},
-		"charts": {"months": [], "sales": [], "collection": [], "receivables": []},
+		"charts": {
+			"months": [],
+			"sales": [],
+			"sales_net": [],
+			"sales_gross": [],
+			"collection": [],
+			"receivables": [],
+			"sales_ly": [],
+			"sales_growth_pct": [],
+		},
 		"recent_invoices": [],
 		"open_sales_orders": {"rows": [], "pagination": {"total": 0, "limit": open_so_limit, "offset": 0}},
 		"statement": statement,

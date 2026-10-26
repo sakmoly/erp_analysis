@@ -8,6 +8,8 @@ REDIRECT_URIS = "\n".join(
 		"erpnext://redirect",
 		"exp://127.0.0.1:8081/--/oauth",
 		"exp://localhost:8081/--/oauth",
+		"https://printechs.com/mobile/oauth",
+		"http://localhost:5173/mobile/oauth",
 	]
 )
 

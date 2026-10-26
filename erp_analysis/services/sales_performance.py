@@ -228,12 +228,40 @@ def _product_group_spec(group_by: str) -> tuple[str, str, str]:
 	return specs.get(group_key, specs["brand"])
 
 
+def _dashboard_division_sql(
+	divisions: Optional[List[str]],
+	cols: set[str],
+) -> tuple[str, list[Any]]:
+	if not divisions or "Division" not in cols:
+		return "", []
+	cleaned = [str(d).strip() for d in divisions if d is not None and str(d).strip()]
+	if not cleaned:
+		return "", []
+	placeholders = ", ".join(["%s"] * len(cleaned))
+	return f" AND COALESCE(`Division`, '') IN ({placeholders})", cleaned
+
+
+def _dashboard_sub_group_sql(
+	sub_groups: Optional[List[str]],
+	cols: set[str],
+) -> tuple[str, list[Any]]:
+	if not sub_groups or "Sub_Group" not in cols:
+		return "", []
+	cleaned = [str(s).strip() for s in sub_groups if s is not None and str(s).strip()]
+	if not cleaned:
+		return "", []
+	placeholders = ", ".join(["%s"] * len(cleaned))
+	return f" AND COALESCE(`Sub_Group`, '') IN ({placeholders})", cleaned
+
+
 def _product_metrics_from_dashboard(
 	company: Optional[str],
 	start: date,
 	end: date,
 	group_by: str,
 	territories: Optional[List[str]] = None,
+	divisions: Optional[List[str]] = None,
+	sub_groups: Optional[List[str]] = None,
 ) -> dict[str, dict[str, Any]]:
 	cols = _dashboard_columns()
 	if not cols:
@@ -249,6 +277,8 @@ def _product_metrics_from_dashboard(
 
 	company_sql, company_params = _company_filter_dashboard(company, cols)
 	terr_sql, terr_params = _dashboard_territory_sql(territories, cols)
+	div_sql, div_params = _dashboard_division_sql(divisions, cols)
+	sub_sql, sub_params = _dashboard_sub_group_sql(sub_groups, cols)
 	qty_select = f"COALESCE(SUM(`{qty_col}`), 0) AS sold_qty," if qty_col and qty_col in cols else "0 AS sold_qty,"
 	gp_select = (
 		f"COALESCE(SUM(`{sales_col}`), 0) - COALESCE(SUM(`{cogs_col}`), 0) AS gp,"
@@ -275,9 +305,11 @@ def _product_metrics_from_dashboard(
 		WHERE `{date_col}` BETWEEN %s AND %s
 		  {company_sql}
 		  {terr_sql}
+		  {div_sql}
+		  {sub_sql}
 		GROUP BY COALESCE(`{col_name}`, 'Unassigned')
 		""",
-		tuple([start, end, *company_params, *terr_params]),
+		tuple([start, end, *company_params, *terr_params, *div_params, *sub_params]),
 		as_dict=True,
 	)
 
@@ -301,6 +333,8 @@ def _product_metrics_from_sales_invoice(
 	end: date,
 	group_by: str,
 	territories: Optional[List[str]] = None,
+	divisions: Optional[List[str]] = None,
+	sub_groups: Optional[List[str]] = None,
 ) -> dict[str, dict[str, Any]]:
 	_, _, group_sql = _product_group_spec(group_by)
 	company_sql = ""
@@ -310,6 +344,27 @@ def _product_metrics_from_sales_invoice(
 		params.append(company)
 	terr_sql, terr_params = _si_territory_sql(territories)
 	params.extend(terr_params)
+
+	div_sql = ""
+	if divisions:
+		div_field = None
+		for candidate in ("custom_division", "division"):
+			if frappe.db.has_column("Sales Invoice", candidate):
+				div_field = candidate
+				break
+		cleaned = [str(d).strip() for d in divisions if d is not None and str(d).strip()]
+		if div_field and cleaned:
+			placeholders = ", ".join(["%s"] * len(cleaned))
+			div_sql = f" AND COALESCE(si.`{div_field}`, '') IN ({placeholders})"
+			params.extend(cleaned)
+
+	sub_sql = ""
+	if sub_groups:
+		cleaned = [str(s).strip() for s in sub_groups if s is not None and str(s).strip()]
+		if cleaned:
+			placeholders = ", ".join(["%s"] * len(cleaned))
+			sub_sql = f" AND COALESCE(i.item_group, '') IN ({placeholders})"
+			params.extend(cleaned)
 
 	rows = frappe.db.sql(
 		f"""
@@ -332,6 +387,8 @@ def _product_metrics_from_sales_invoice(
 		  AND si.posting_date BETWEEN %s AND %s
 		  {company_sql}
 		  {terr_sql}
+		  {div_sql}
+		  {sub_sql}
 		GROUP BY {group_sql}
 		""",
 		tuple(params),
@@ -394,9 +451,15 @@ def _merged_product_rows(
 	group_by: str,
 	limit: int,
 	territories: Optional[List[str]] = None,
+	divisions: Optional[List[str]] = None,
+	sub_groups: Optional[List[str]] = None,
 ) -> list[dict[str, Any]]:
-	dashboard = _product_metrics_from_dashboard(company, start, end, group_by, territories)
-	si = _product_metrics_from_sales_invoice(company, start, end, group_by, territories)
+	dashboard = _product_metrics_from_dashboard(
+		company, start, end, group_by, territories, divisions=divisions, sub_groups=sub_groups
+	)
+	si = _product_metrics_from_sales_invoice(
+		company, start, end, group_by, territories, divisions=divisions, sub_groups=sub_groups
+	)
 	company_rate = _company_dashboard_gp_rate(company, start, end) if dashboard else 0.0
 
 	merged: list[dict[str, Any]] = []
@@ -415,9 +478,15 @@ def _product_sales_ly_map(
 	ly_end: date,
 	group_by: str,
 	territories: Optional[List[str]] = None,
+	divisions: Optional[List[str]] = None,
+	sub_groups: Optional[List[str]] = None,
 ) -> dict[str, float]:
-	dashboard = _product_metrics_from_dashboard(company, ly_start, ly_end, group_by, territories)
-	si = _product_metrics_from_sales_invoice(company, ly_start, ly_end, group_by, territories)
+	dashboard = _product_metrics_from_dashboard(
+		company, ly_start, ly_end, group_by, territories, divisions=divisions, sub_groups=sub_groups
+	)
+	si = _product_metrics_from_sales_invoice(
+		company, ly_start, ly_end, group_by, territories, divisions=divisions, sub_groups=sub_groups
+	)
 	company_rate = _company_dashboard_gp_rate(company, ly_start, ly_end) if dashboard else 0.0
 
 	out: dict[str, float] = {}
@@ -1088,6 +1157,219 @@ def _ar_by_salesperson(company: Optional[str]) -> dict[str, dict[str, float]]:
 	}
 
 
+def _item_sales_from_dashboard(
+	company: Optional[str],
+	item_code: str,
+	start: date,
+	end: date,
+	*,
+	brand: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> dict[str, float]:
+	cols = _dashboard_columns()
+	if not cols or "Item_Code" not in cols:
+		return {"sold_qty": 0.0, "total_sales": 0.0}
+
+	date_col = "Invoice_Date" if "Invoice_Date" in cols else "invoice_date"
+	sales_col = "Net_Amount" if "Net_Amount" in cols else "net_amount"
+	qty_col = "Sold_Qty" if "Sold_Qty" in cols else None
+	if not qty_col:
+		return {"sold_qty": 0.0, "total_sales": 0.0}
+
+	company_sql, company_params = _company_filter_dashboard(company, cols)
+	terr_sql, terr_params = _dashboard_territory_sql(territories, cols)
+	brand_sql = ""
+	brand_params: list[Any] = []
+	if brand is not None and str(brand).strip() and "Brand" in cols:
+		brand_sql = " AND COALESCE(`Brand`, 'Unassigned') = %s"
+		brand_params = [brand.strip()]
+	status_sql = ""
+	if "Doc_Status" in cols:
+		status_sql = " AND (`Doc_Status` = 1 OR `Doc_Status` IS NULL)"
+
+	params: list[Any] = [item_code, start, end, *company_params, *terr_params, *brand_params]
+	row = frappe.db.sql(
+		f"""
+		SELECT
+			COALESCE(SUM(`{qty_col}`), 0) AS sold_qty,
+			COALESCE(SUM(`{sales_col}`), 0) AS total_sales
+		FROM `tabSalesDashBoard`
+		WHERE `Item_Code` = %s
+		  AND `{date_col}` BETWEEN %s AND %s
+		  {company_sql}
+		  {terr_sql}
+		  {brand_sql}
+		  {status_sql}
+		""",
+		tuple(params),
+		as_dict=True,
+	)
+	if not row:
+		return {"sold_qty": 0.0, "total_sales": 0.0}
+	return {
+		"sold_qty": float(row[0].sold_qty or 0),
+		"total_sales": float(row[0].total_sales or 0),
+	}
+
+
+def _item_sales_from_sales_invoice(
+	company: Optional[str],
+	item_code: str,
+	start: date,
+	end: date,
+	*,
+	brand: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> dict[str, float]:
+	company_sql = ""
+	params: list[Any] = [item_code, start, end]
+	if company:
+		company_sql = " AND si.company = %s"
+		params.append(company)
+	terr_sql, terr_params = _si_territory_sql(territories)
+	params.extend(terr_params)
+	brand_sql = ""
+	if brand is not None and str(brand).strip():
+		brand_sql = " AND COALESCE(NULLIF(i.brand, ''), 'No Brand') = %s"
+		params.append(brand.strip())
+
+	row = frappe.db.sql(
+		f"""
+		SELECT
+			COALESCE(SUM(sii.qty), 0) AS sold_qty,
+			COALESCE(SUM(sii.base_net_amount), 0) AS total_sales
+		FROM `tabSales Invoice` si
+		INNER JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
+		LEFT JOIN `tabItem` i ON i.name = sii.item_code
+		WHERE si.docstatus = 1
+		  AND sii.item_code = %s
+		  AND si.posting_date BETWEEN %s AND %s
+		  {company_sql}
+		  {terr_sql}
+		  {brand_sql}
+		""",
+		tuple(params),
+		as_dict=True,
+	)
+	if not row:
+		return {"sold_qty": 0.0, "total_sales": 0.0}
+	return {
+		"sold_qty": float(row[0].sold_qty or 0),
+		"total_sales": float(row[0].total_sales or 0),
+	}
+
+
+def get_item_sales_metrics(
+	company: Optional[str],
+	item_code: str,
+	start: date,
+	end: date,
+	*,
+	brand: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> dict[str, float]:
+	"""Sold qty and net sales for one item (SalesDashBoard + SI merge, same as rankings)."""
+	item_code = (item_code or "").strip()
+	if not item_code:
+		return {"sold_qty": 0.0, "total_sales": 0.0}
+
+	dash = {
+		"label": item_code,
+		**_item_sales_from_dashboard(
+			company, item_code, start, end, brand=brand, territories=territories
+		),
+	}
+	si = {
+		"label": item_code,
+		**_item_sales_from_sales_invoice(
+			company, item_code, start, end, brand=brand, territories=territories
+		),
+	}
+	merged = _merge_product_metric_pair(dash, si)
+	if not merged:
+		return {"sold_qty": 0.0, "total_sales": 0.0}
+	return {
+		"sold_qty": float(merged.get("sold_qty") or 0),
+		"total_sales": float(merged.get("total_sales") or 0),
+	}
+
+
+def get_item_product_performance(
+	company: Optional[str],
+	item_code: str,
+	period: Optional[str] = None,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	*,
+	brand: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> dict[str, Any]:
+	"""Mobile days-of-supply payload: one row with qty (sold), sales, asp."""
+	start, end = _period_bounds(period, from_date, to_date)
+	item_code = (item_code or "").strip()
+	metrics = get_item_sales_metrics(
+		company, item_code, start, end, brand=brand, territories=territories
+	)
+	sold_qty = round(metrics["sold_qty"], 2)
+	total_sales = round(metrics["total_sales"], 2)
+	return {
+		"level": "item",
+		"period": {"from_date": str(start), "to_date": str(end)},
+		"rows": [
+			{
+				"item_code": item_code,
+				"qty": sold_qty,
+				"sales": total_sales,
+				"asp": _asp(total_sales, sold_qty),
+			}
+		],
+	}
+
+
+def get_item_sales_qty(
+	company: Optional[str],
+	item_code: str,
+	period: Optional[str] = None,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	*,
+	brand: Optional[str] = None,
+	territory: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> dict[str, Any]:
+	"""Sold qty and sales value for one item in a date range (optional territory filter)."""
+	start, end = _period_bounds(period, from_date, to_date)
+	item_code = (item_code or "").strip()
+	terr_list: Optional[List[str]] = None
+	if territory:
+		terr_list = [territory.strip()]
+	elif territories:
+		if isinstance(territories, str):
+			terr_list = [t.strip() for t in territories.split(",") if t.strip()]
+		else:
+			terr_list = list(territories)
+
+	metrics = get_item_sales_metrics(
+		company, item_code, start, end, brand=brand, territories=terr_list
+	)
+	sold_qty = round(metrics["sold_qty"], 2)
+	total_sales = round(metrics["total_sales"], 2)
+	out: dict[str, Any] = {
+		"item_code": item_code,
+		"from_date": str(start),
+		"to_date": str(end),
+		"qty_sold": sold_qty,
+		"sales_value": total_sales,
+		# Mobile parser aliases (itemSalesQty.ts)
+		"qty": sold_qty,
+		"sales_qty": sold_qty,
+		"quantity_sold": sold_qty,
+	}
+	if territory:
+		out["territory"] = territory.strip()
+	return out
+
+
 def get_product_ranking(
 	company: Optional[str] = None,
 	group_by: str = "brand",
@@ -1096,6 +1378,8 @@ def get_product_ranking(
 	to_date: Optional[str] = None,
 	limit: int = 20,
 	territories: Optional[List[str]] = None,
+	division: Any = None,
+	sub_group: Any = None,
 ) -> dict[str, Any]:
 	start, end = _period_bounds(period, from_date, to_date)
 	ly_start, ly_end = _ly_period(start, end)
@@ -1103,8 +1387,34 @@ def get_product_ranking(
 	if group_key not in ("item", "item_group", "brand"):
 		group_key = "brand"
 
-	rows = _merged_product_rows(company, start, end, group_key, limit, territories)
-	sales_ly_map = _product_sales_ly_map(company, ly_start, ly_end, group_key, territories)
+	divisions: Optional[List[str]] = None
+	if division is not None:
+		if isinstance(division, (list, tuple)):
+			divisions = [str(d).strip() for d in division if d is not None and str(d).strip()]
+		elif str(division).strip():
+			divisions = [str(division).strip()]
+
+	sub_groups: Optional[List[str]] = None
+	if sub_group is not None:
+		if isinstance(sub_group, (list, tuple)):
+			sub_groups = [str(s).strip() for s in sub_group if s is not None and str(s).strip()]
+		elif str(sub_group).strip():
+			sub_groups = [str(sub_group).strip()]
+
+	if sub_groups:
+		from erp_analysis.services.analytics_sales import _coalesce_dashboard_filter_keys
+
+		coalesced = _coalesce_dashboard_filter_keys(
+			{"division": divisions or [], "sub_group": sub_groups}
+		)
+		sub_groups = coalesced.get("sub_group") or sub_groups
+
+	rows = _merged_product_rows(
+		company, start, end, group_key, limit, territories, divisions=divisions, sub_groups=sub_groups
+	)
+	sales_ly_map = _product_sales_ly_map(
+		company, ly_start, ly_end, group_key, territories, divisions=divisions, sub_groups=sub_groups
+	)
 
 	enriched: list[dict[str, Any]] = []
 	for row in rows:

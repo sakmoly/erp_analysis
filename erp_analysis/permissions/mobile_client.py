@@ -239,6 +239,15 @@ def client_get(doctype, name=None, filters=None, parent=None):
 		_assert_mobile_view_territory_for_doc(doctype, doc)
 		return doc
 
+	# Mobile approve: Access Profile approve territories (not User Permission on Territory).
+	if name and doctype in ("Delivery Note", "Sales Invoice"):
+		from erp_analysis.approvals import user_can_mobile_approve
+
+		if user_can_mobile_approve(doctype, name, user=user):
+			doc = frappe.get_doc(doctype, name, ignore_permissions=True)
+			doc.apply_fieldlevel_read_permissions()
+			return doc.as_dict()
+
 	return _ORIGINAL_CLIENT_GET(doctype, name, filters, parent)
 
 

@@ -216,11 +216,168 @@ def get_overdue_customers(
 	]
 
 
+def _advances_territory_scope(
+	company: Optional[str],
+	*,
+	territory: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> Optional[List[str]]:
+	"""Same territory scope as receivables / collection attention."""
+	if territories is not None:
+		return territories
+	return resolve_territory_scope(
+		requested=territory,
+		company=company,
+		purpose="view",
+		module="receivables",
+	)
+
+
+def _advances_customer_join_and_terr_sql(
+	territories: Optional[List[str]],
+) -> tuple[str, str, list[Any]]:
+	if not territories:
+		return "", "", []
+	party_join = """
+		INNER JOIN `tabCustomer` c
+			ON c.name = pe.party AND pe.party_type = 'Customer'
+	"""
+	terr_sql, terr_params = _customer_territory_sql(territories)
+	return party_join, terr_sql, terr_params
+
+
+def get_customer_advances_by_customer(
+	company: Optional[str] = None,
+	min_unallocated: float = 0.01,
+	limit: int = 50,
+	territory: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> list[dict[str, Any]]:
+	company = company or frappe.defaults.get_user_default("Company")
+	if not company:
+		return []
+
+	scope = _advances_territory_scope(company, territory=territory, territories=territories)
+	party_join, terr_sql, terr_params = _advances_customer_join_and_terr_sql(scope)
+	company_sql, company_params = _company_sql(company)
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT
+			pe.party AS customer,
+			COALESCE(c.customer_name, pe.party) AS customer_name,
+			COALESCE(c.territory, '') AS territory,
+			COALESCE(SUM(pe.unallocated_amount), 0) AS advance_amount,
+			COUNT(pe.name) AS payment_count
+		FROM `tabPayment Entry` pe
+		{party_join or "LEFT JOIN `tabCustomer` c ON c.name = pe.party AND pe.party_type = 'Customer'"}
+		WHERE pe.docstatus = 1
+		  AND pe.payment_type = 'Receive'
+		  AND pe.party_type = 'Customer'
+		  {company_sql}
+		  AND pe.unallocated_amount >= %s
+		  {terr_sql}
+		GROUP BY pe.party, c.customer_name, c.territory
+		HAVING advance_amount > 0
+		ORDER BY advance_amount DESC
+		LIMIT %s
+		""",
+		tuple([*company_params, float(min_unallocated), *terr_params, int(limit)]),
+		as_dict=True,
+	)
+
+	return [
+		{
+			"customer": row.customer,
+			"customer_name": row.customer_name,
+			"territory": row.territory,
+			"advance_amount": round(float(row.advance_amount or 0), 2),
+			"payment_count": int(row.payment_count or 0),
+		}
+		for row in rows
+	]
+
+
+def get_customer_advances_summary(
+	company: Optional[str] = None,
+	min_unallocated: float = 0.01,
+	territory: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+) -> dict[str, Any]:
+	company = company or frappe.defaults.get_user_default("Company")
+	if not company:
+		return {"total_advance": 0, "customer_count": 0, "payment_count": 0}
+
+	scope = _advances_territory_scope(company, territory=territory, territories=territories)
+	party_join, terr_sql, terr_params = _advances_customer_join_and_terr_sql(scope)
+	company_sql, company_params = _company_sql(company)
+	min_val = float(min_unallocated)
+
+	row = frappe.db.sql(
+		f"""
+		SELECT
+			COALESCE(SUM(pe.unallocated_amount), 0) AS total_advance,
+			COUNT(DISTINCT pe.party) AS customer_count,
+			COUNT(pe.name) AS payment_count
+		FROM `tabPayment Entry` pe
+		{party_join}
+		WHERE pe.docstatus = 1
+		  AND pe.payment_type = 'Receive'
+		  AND pe.party_type = 'Customer'
+		  {company_sql}
+		  AND pe.unallocated_amount >= %s
+		  {terr_sql}
+		""",
+		tuple([*company_params, min_val, *terr_params]),
+		as_dict=True,
+	)
+	data = row[0] if row else {}
+	return {
+		"total_advance": round(float(data.get("total_advance") or 0), 2),
+		"customer_count": int(data.get("customer_count") or 0),
+		"payment_count": int(data.get("payment_count") or 0),
+	}
+
+
+def get_customer_advances_chart_series(
+	company: Optional[str] = None,
+	limit: int = 10,
+	territory: Optional[str] = None,
+	territories: Optional[List[str]] = None,
+	min_unallocated: float = 0.01,
+) -> list[dict[str, Any]]:
+	rows = get_customer_advances_by_customer(
+		company=company,
+		min_unallocated=min_unallocated,
+		limit=limit,
+		territory=territory,
+		territories=territories,
+	)
+	series: list[dict[str, Any]] = []
+	for row in rows:
+		label = row.get("customer_name") or row.get("customer") or "Unknown"
+		amount = float(row.get("advance_amount") or 0)
+		point: dict[str, Any] = {
+			"label": label,
+			"value": round(amount, 2),
+			"dimension_value": row.get("customer") or label,
+			"customer": row.get("customer"),
+			"advance_amount": round(amount, 2),
+		}
+		if row.get("territory"):
+			point["territory"] = row["territory"]
+		if row.get("payment_count"):
+			point["payment_count"] = int(row["payment_count"])
+		series.append(point)
+	return series
+
+
 def get_unallocated_payments(
 	company: Optional[str] = None,
 	min_unallocated: float = 100.0,
 	limit: int = 20,
 	territories: Optional[List[str]] = None,
+	party: Optional[str] = None,
 ) -> list[dict[str, Any]]:
 	company = company or frappe.defaults.get_user_default("Company")
 	if not company:
@@ -229,6 +386,12 @@ def get_unallocated_payments(
 	party_join = ""
 	terr_sql = ""
 	terr_params: list[Any] = []
+	party_filter_sql = ""
+	party_filter_params: list[Any] = []
+	if party:
+		party_filter_sql = " AND pe.party = %s"
+		party_filter_params.append(party)
+
 	if territories:
 		party_join = """
 			INNER JOIN `tabCustomer` c
@@ -251,11 +414,12 @@ def get_unallocated_payments(
 		  AND pe.party_type = 'Customer'
 		  AND pe.company = %s
 		  AND pe.unallocated_amount >= %s
+		  {party_filter_sql}
 		  {terr_sql}
 		ORDER BY pe.unallocated_amount DESC
 		LIMIT %s
 		""",
-		(company, float(min_unallocated), *terr_params, int(limit)),
+		(company, float(min_unallocated), *party_filter_params, *terr_params, int(limit)),
 		as_dict=True,
 	)
 

@@ -39,6 +39,7 @@ doc_events = {
 app_init = [
 	"erp_analysis.permissions.customer.apply_customer_360_permission_patch",
 	"erp_analysis.permissions.strict_empty_links.apply_strict_empty_link_patch",
+	"erp_analysis.integrations.zatca_mobile_defer.apply_zatca_mobile_defer_patch",
 ]
 
 before_request = [
@@ -54,6 +55,7 @@ override_whitelisted_methods = {
 	"frappe.client.get_list": "erp_analysis.permissions.mobile_client.client_get_list",
 	"frappe.client.get": "erp_analysis.permissions.mobile_client.client_get",
 	"frappe.desk.reportview.get": "erp_analysis.permissions.mobile_client.reportview_get",
+	"frappe.model.workflow.apply_workflow": "erp_analysis.approvals.apply_workflow_mobile",
 }
 
 permission_query_conditions = {

@@ -394,14 +394,9 @@ def get_sales_by_territory_chart(company, from_date, to_date):
 def get_sales_by_division_chart(company, from_date, to_date):
     try:
         # Set to True if Invoice_Date is stored as text like 'YYYY-MM-DD'
-        INVOICE_DATE_IS_STRING = True
-        DATE_MASK = "%Y-%m-%d"
-
-        date_expr = (
-            f"STR_TO_DATE(`Invoice_Date`, '{DATE_MASK}')"
-            if INVOICE_DATE_IS_STRING else
-            "`Invoice_Date`"
-        )
+        INVOICE_DATE_IS_STRING = False
+        # PyMySQL treats `%` in SQL as param placeholders — use DATE columns directly.
+        date_expr = "`Invoice_Date`"
 
         params = [from_date, to_date]
         company_sql = ""

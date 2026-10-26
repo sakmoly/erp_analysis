@@ -20,6 +20,254 @@ OBJECT_KEY_BY_DOCTYPE = {
     "Delivery Note": "erp_analysis.approvals.delivery_note",
 }
 
+MOBILE_APPROVAL_DOCTYPES = frozenset(OBJECT_KEY_BY_DOCTYPE.keys())
+
+import frappe.model.workflow as _workflow_module
+
+_ORIGINAL_APPLY_WORKFLOW = _workflow_module.apply_workflow
+
+
+def _object_key_for_doctype(doctype: str) -> str:
+    return OBJECT_KEY_BY_DOCTYPE.get(doctype) or f"erp_analysis.approvals.{frappe.scrub(doctype)}"
+
+
+def _ensure_mobile_approve_access(
+    doctype: str,
+    docname: str,
+    *,
+    company: Optional[str] = None,
+    territory: Optional[str] = None,
+    branch: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Access Profile approve territories + can_approve (not User Permission)."""
+    doc_meta = frappe.db.get_value(
+        doctype,
+        docname,
+        ["company", "territory", "branch"],
+        as_dict=True,
+    )
+    if not doc_meta:
+        frappe.throw(_("Document {0} {1} not found.").format(doctype, docname), frappe.DoesNotExistError)
+
+    doc_company = (company or doc_meta.get("company") or "").strip()
+    doc_territory = (territory or doc_meta.get("territory") or "").strip()
+    doc_branch = (branch or doc_meta.get("branch") or "").strip()
+    if not branch:
+        branch = frappe.db.get_value("Employee", {"user_id": frappe.session.user}, "branch") or ""
+    branch = (branch or "").strip()
+    doc_branch = doc_branch or branch
+
+    assert_document_territory_allowed(
+        doc_meta.get("territory"), company=doc_company, purpose="approve"
+    )
+
+    object_key = _object_key_for_doctype(doctype)
+    from erp_analysis.permissions.access_profile import get_approve_territories
+
+    allowed = get_approve_territories(company=doc_company)
+    territory_candidates: List[Optional[str]] = []
+    for value in [doc_territory, territory]:
+        if value and str(value).strip():
+            value = str(value).strip()
+            if allowed is not None and value not in set(allowed):
+                continue
+            if value not in territory_candidates:
+                territory_candidates.append(value)
+    if allowed is None and None not in territory_candidates:
+        territory_candidates.append(None)
+    if not territory_candidates and allowed:
+        territory_candidates = list(allowed[:1])
+
+    branch_candidates: List[Optional[str]] = []
+    for value in [doc_branch, branch, "", None]:
+        candidate = (value or "").strip()
+        if candidate and candidate not in branch_candidates:
+            branch_candidates.append(candidate)
+    if None not in branch_candidates:
+        branch_candidates.append(None)
+
+    decision: Optional[Dict[str, Any]] = None
+    last_error: Optional[str] = None
+    for terr in territory_candidates or [None]:
+        for br in branch_candidates or [None]:
+            try:
+                decision = evaluate(
+                    frappe.session.user,
+                    doc_company,
+                    terr or None,
+                    br or None,
+                    object_key,
+                )
+                break
+            except PermissionDenied:
+                last_error = frappe.get_traceback()
+                continue
+        if decision:
+            break
+
+    if not decision or not decision.get("can_approve"):
+        if last_error:
+            frappe.log_error(
+                title="approve_document permission failure",
+                message=(
+                    f"doctype={doctype}, name={docname}, company={doc_company}, "
+                    f"territory={doc_territory}, branch={branch}, object_key={object_key}\n{last_error}"
+                ),
+            )
+        frappe.throw(
+            f"You do not have approval access for {doctype} {docname}.",
+            frappe.PermissionError,
+        )
+    return doc_meta
+
+
+def _bypass_load_doc_before_save(self, *, raise_exception: bool = False):
+    """Load _doc_before_save with ignore_permissions (workflow validate uses it)."""
+    self._doc_before_save = None
+    if self.is_new():
+        return
+    try:
+        self._doc_before_save = frappe.get_doc(
+            self.doctype, self.name, for_update=True, ignore_permissions=True
+        )
+        self._doc_before_save.flags.ignore_permissions = True
+    except frappe.DoesNotExistError:
+        if raise_exception:
+            raise
+        frappe.clear_last_message()
+
+
+def _persist_doc_after_workflow(doc, *, save: bool = False, submit: bool = False, cancel: bool = False):
+    """Save/submit/cancel with User Permission bypass after profile approve gate."""
+    import types
+    from frappe.model.document import Document
+
+    doc.flags.ignore_permissions = True
+    doc.load_doc_before_save = types.MethodType(_bypass_load_doc_before_save, doc)
+    prev_flag = getattr(frappe.flags, "ignore_permissions", False)
+    frappe.flags.ignore_permissions = True
+
+    orig_get_transitions = _workflow_module.get_transitions
+
+    def _get_transitions_bypass(d, workflow=None, raise_exception=False):
+        if isinstance(d, Document):
+            d.flags.ignore_permissions = True
+        elif isinstance(d, dict):
+            d = frappe.get_doc(d)
+            d.flags.ignore_permissions = True
+        return orig_get_transitions(d, workflow, raise_exception=raise_exception)
+
+    _workflow_module.get_transitions = _get_transitions_bypass
+    try:
+        if submit:
+            doc.submit()
+        elif cancel:
+            doc.cancel()
+        elif save:
+            doc.save(ignore_permissions=True)
+    finally:
+        _workflow_module.get_transitions = orig_get_transitions
+        frappe.flags.ignore_permissions = prev_flag
+
+
+def user_can_mobile_approve(doctype: str, docname: str, *, user: Optional[str] = None) -> bool:
+    """True when Access Profile allows approve on this document (ignores User Permission)."""
+    if doctype not in MOBILE_APPROVAL_DOCTYPES or not docname:
+        return False
+    user = user or frappe.session.user
+    if user in ("Administrator", "Guest") or "System Manager" in frappe.get_roles(user):
+        return user != "Guest"
+    if user != frappe.session.user:
+        return False
+    try:
+        _ensure_mobile_approve_access(doctype, docname)
+        return True
+    except Exception:
+        return False
+
+
+def _apply_workflow_trusted(doc, action: str) -> "frappe.model.document.Document":
+    """Apply workflow without reloading doc (preserves ignore_permissions)."""
+    from frappe.model.docstatus import DocStatus
+
+    workflow = _workflow_module.get_workflow(doc.doctype)
+    if not workflow:
+        frappe.throw(_("No active workflow for {0}").format(doc.doctype))
+
+    doc.flags.ignore_permissions = True
+    transitions = _workflow_module.get_transitions(doc, workflow, raise_exception=False)
+    desired = (action or "").strip()
+    transition = None
+    for row in transitions:
+        if (row.get("action") or "") == desired:
+            transition = row
+            break
+
+    if not transition:
+        frappe.throw(_("Not a valid Workflow Action"), _workflow_module.WorkflowTransitionError)
+
+    user = frappe.session.user
+    if not _workflow_module.has_approval_access(user, doc, transition):
+        frappe.throw(_("Self approval is not allowed"))
+
+    doc.set(workflow.workflow_state_field, transition.get("next_state"))
+    next_state = next(d for d in workflow.states if d.state == transition.get("next_state"))
+
+    if next_state.update_field:
+        doc.set(next_state.update_field, next_state.update_value)
+
+    new_docstatus = DocStatus(next_state.doc_status or 0)
+    if doc.docstatus.is_draft() and new_docstatus.is_draft():
+        _persist_doc_after_workflow(doc, save=True)
+    elif doc.docstatus.is_draft() and new_docstatus.is_submitted():
+        _persist_doc_after_workflow(doc, submit=True)
+    elif doc.docstatus.is_submitted() and new_docstatus.is_submitted():
+        _persist_doc_after_workflow(doc, save=True)
+    elif doc.docstatus.is_submitted() and new_docstatus.is_cancelled():
+        _persist_doc_after_workflow(doc, cancel=True)
+    else:
+        frappe.throw(_("Illegal Document Status for {0}").format(next_state.state))
+
+    doc.add_comment("Workflow", _(next_state.state))
+    return doc
+
+
+@frappe.whitelist()
+def apply_workflow_mobile(doc, action):
+    """
+    Mobile workflow apply: bypass User Permission when user has Access Profile
+    approve rights but no Desk read on the document.
+    """
+    if isinstance(doc, str):
+        doc = frappe.parse_json(doc)
+    if isinstance(doc, dict):
+        doctype = doc.get("doctype")
+        name = doc.get("name")
+    else:
+        doctype = getattr(doc, "doctype", None)
+        name = getattr(doc, "name", None)
+
+    if not doctype or not name:
+        return _ORIGINAL_APPLY_WORKFLOW(doc, action)
+
+    if doctype not in MOBILE_APPROVAL_DOCTYPES:
+        return _ORIGINAL_APPLY_WORKFLOW(doc, action)
+
+    if not user_can_mobile_approve(doctype, name):
+        return _ORIGINAL_APPLY_WORKFLOW(doc, action)
+
+    _ensure_mobile_approve_access(doctype, name)
+    docobj = frappe.get_doc(doctype, name, ignore_permissions=True)
+    docobj.flags.ignore_permissions = True
+    prev_defer_zatca = getattr(frappe.flags, "defer_zatca_for_mobile_approve", False)
+    if doctype == "Sales Invoice":
+        frappe.flags.defer_zatca_for_mobile_approve = True
+    try:
+        return _apply_workflow_trusted(docobj, action)
+    finally:
+        if doctype == "Sales Invoice":
+            frappe.flags.defer_zatca_for_mobile_approve = prev_defer_zatca
+
 
 @frappe.whitelist(methods=["POST"])
 def approve_document(
@@ -91,136 +339,79 @@ def approve_document(
     territory = (territory or payload.get("territory") or "").strip()
     branch = (branch or payload.get("branch") or "").strip()
 
-    doc = frappe.get_doc(doctype, docname)
-
-    doc_company = company or getattr(doc, "company", None) or ""
-    doc_territory = territory or getattr(doc, "territory", None) or ""
-    doc_branch = branch or getattr(doc, "branch", None) or ""
-    if not branch:
-        branch = frappe.db.get_value("Employee", {"user_id": frappe.session.user}, "branch") or ""
-    branch = branch.strip()
-    doc_branch = (doc_branch or "").strip()
-
-    # Profile users: document territory must be inside approve_territories
-    assert_document_territory_allowed(
-        getattr(doc, "territory", None), company=doc_company, purpose="approve"
+    _ensure_mobile_approve_access(
+        doctype,
+        docname,
+        company=company or None,
+        territory=territory or None,
+        branch=branch or None,
     )
 
-    object_key = OBJECT_KEY_BY_DOCTYPE.get(doctype)
-    if not object_key:
-        object_key = f"erp_analysis.approvals.{frappe.scrub(doctype)}"
-
-    from erp_analysis.permissions.access_profile import get_approve_territories
-
-    allowed = get_approve_territories(company=doc_company)
-    territory_candidates: List[Optional[str]] = []
-    for value in [doc_territory, territory]:
-        if value and str(value).strip():
-            value = str(value).strip()
-            if allowed is not None and value not in set(allowed):
-                continue
-            if value not in territory_candidates:
-                territory_candidates.append(value)
-    # Non-profile users keep loose None candidate; profile users stay within allowed only
-    if allowed is None and None not in territory_candidates:
-        territory_candidates.append(None)
-    if not territory_candidates and allowed:
-        territory_candidates = list(allowed[:1])
-
-    branch_candidates: List[Optional[str]] = []
-    for value in [doc_branch, branch, "", None]:
-        candidate = (value or "").strip()
-        if candidate and candidate not in branch_candidates:
-            branch_candidates.append(candidate)
-    if None not in branch_candidates:
-        branch_candidates.append(None)
-
-    decision: Optional[Dict[str, Any]] = None
-    last_error: Optional[str] = None
-    for terr in territory_candidates or [None]:
-        for br in branch_candidates or [None]:
-            try:
-                decision = evaluate(
-                    frappe.session.user,
-                    doc_company,
-                    terr or None,
-                    br or None,
-                    object_key,
-                )
-                break
-            except PermissionDenied:
-                last_error = frappe.get_traceback()
-                continue
-        if decision:
-            break
-
-    if not decision:
-        if last_error:
-            frappe.log_error(
-                title="approve_document permission failure",
-                message=(
-                    f"doctype={doctype}, name={docname}, company={doc_company}, territory={doc_territory}, "
-                    f"branch={branch}, object_key={object_key}\n{last_error}"
-                ),
-            )
-        frappe.throw(
-            f"You do not have approval access for {doctype} {docname}.",
-            frappe.PermissionError,
-        )
-
-    if not decision.get("can_approve"):
-        frappe.throw(
-            f"You do not have approval access for {doctype} {docname}.",
-            frappe.PermissionError,
-        )
+    doc = frappe.get_doc(doctype, docname, ignore_permissions=True)
+    doc.flags.ignore_permissions = True
 
     workflow_applied = False
+    zatca_deferred = False
+    prev_defer_zatca = getattr(frappe.flags, "defer_zatca_for_mobile_approve", False)
+    if doctype == "Sales Invoice":
+        frappe.flags.defer_zatca_for_mobile_approve = True
 
-    workflow_name = frappe.model.workflow.get_workflow_name(doctype)
-    desired_action = workflow_action or action
-    if workflow_name:
-        transitions: List[Dict[str, Any]] = []
-        try:
-            transitions = frappe.model.workflow.get_transitions(doc, raise_exception=False)
-        except Exception:
-            frappe.log_error(
-                title="approve_document transitions error",
-                message=f"doctype={doctype}, name={docname}\n{frappe.get_traceback()}",
-            )
-        if not desired_action and len(transitions) == 1:
-            desired_action = transitions[0].get("action")
-        if not desired_action:
-            for transition in transitions:
-                if transition.get("action", "").lower() == "approve":
-                    desired_action = transition.get("action")
-                    break
-        if desired_action:
+    try:
+        workflow_name = frappe.model.workflow.get_workflow_name(doctype)
+        desired_action = workflow_action or action
+        if workflow_name:
+            transitions: List[Dict[str, Any]] = []
             try:
-                frappe.model.workflow.apply_workflow(doc, desired_action)
-                workflow_applied = True
+                transitions = frappe.model.workflow.get_transitions(doc, raise_exception=False)
             except Exception:
                 frappe.log_error(
-                    title="approve_document workflow error",
-                    message=(
-                        f"doctype={doctype}, name={docname}, action={desired_action}\n"
-                        f"{frappe.get_traceback()}"
-                    ),
+                    title="approve_document transitions error",
+                    message=f"doctype={doctype}, name={docname}\n{frappe.get_traceback()}",
                 )
-                if workflow_action:
-                    raise
+            if not desired_action and len(transitions) == 1:
+                desired_action = transitions[0].get("action")
+            if not desired_action:
+                for transition in transitions:
+                    if transition.get("action", "").lower() == "approve":
+                        desired_action = transition.get("action")
+                        break
+            if desired_action:
+                try:
+                    _apply_workflow_trusted(doc, desired_action)
+                    workflow_applied = True
+                except Exception:
+                    frappe.log_error(
+                        title="approve_document workflow error",
+                        message=(
+                            f"doctype={doctype}, name={docname}, action={desired_action}\n"
+                            f"{frappe.get_traceback()}"
+                        ),
+                    )
+                    if workflow_action:
+                        raise
 
-    if not workflow_applied:
-        if doc.meta.is_submittable and doc.docstatus == 0:
-            doc.submit()
-        else:
-            doc.save()
+        if not workflow_applied:
+            if doc.meta.is_submittable and doc.docstatus == 0:
+                _persist_doc_after_workflow(doc, submit=True)
+            else:
+                _persist_doc_after_workflow(doc, save=True)
 
-    if comments:
-        doc.add_comment("Comment", comments)
+        if comments:
+            doc.add_comment("Comment", comments)
 
-    frappe.db.commit()
+        if doctype == "Sales Invoice":
+            zatca_deferred = True
 
-    doc.reload()
+        frappe.db.commit()
+    finally:
+        if doctype == "Sales Invoice":
+            frappe.flags.defer_zatca_for_mobile_approve = prev_defer_zatca
+
+    doc = frappe.get_doc(doctype, docname, ignore_permissions=True)
+
+    zatca_status = None
+    if doc.doctype == "Sales Invoice" and doc.meta.has_field("custom_zatca_status"):
+        zatca_status = doc.get("custom_zatca_status")
 
     return {
         "message": {
@@ -231,6 +422,8 @@ def approve_document(
             "workflow_state": getattr(doc, "workflow_state", None),
             "workflow_applied": workflow_applied,
             "workflow_action": desired_action if workflow_applied else None,
+            "zatca_deferred": zatca_deferred,
+            "zatca_status": zatca_status,
         }
     }
 
@@ -256,7 +449,11 @@ def get_all_approvals(
     if not perm_company:
         frappe.throw("Set a default Company or pass ?company=... for approvals.", frappe.ValidationError)
 
-    territory = (territory or frappe.defaults.get_user_default("Territory") or "").strip()
+    territory = (territory or "").strip()
+    if not territory:
+        default_territory = (frappe.defaults.get_user_default("Territory") or "").strip()
+        if default_territory and default_territory.lower() not in ("all territories", "all"):
+            territory = default_territory
     # Branch is intentionally ignored for approvals visibility: access is managed via territories.
     branch = ""
 

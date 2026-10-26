@@ -394,6 +394,7 @@ def _recv_top_customer_series(rows: list, *, limit: int = 10) -> list[dict]:
 
 
 def _recv_overdue_customer_series(rows: list, *, limit: int = 10) -> list[dict]:
+    """Legacy PLE bucket overdue — prefer _recv_overdue_customer_series_si for mobile/PWA."""
     ranked: list[tuple[float, dict]] = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -411,12 +412,75 @@ def _recv_overdue_customer_series(rows: list, *, limit: int = 10) -> list[dict]:
         if days > 0:
             point["days"] = days
             point["days_overdue"] = days
+        customer_id = row.get("party") or row.get("customer")
+        if customer_id:
+            point["customer"] = customer_id
+            point["dimension_value"] = customer_id
         out.append(point)
     return out
 
 
-def _recv_chart_payload(company: Optional[str], chart_key: str, *, limit: int = 10) -> dict:
-    dash = get_receivables_dashboard(company=company)
+def _recv_overdue_customer_series_si(
+    company: str,
+    *,
+    limit: int = 10,
+    territory: Optional[str] = None,
+) -> list[dict]:
+    """Top customers by overdue = sum(SI.outstanding) where due_date < today (matches statement / Customer 360)."""
+    scope = resolve_territory_scope(requested=territory, company=company, module="receivables") or []
+    terr_sql, terr_params = si_territory_sql(scope, field="si.territory")
+    today = frappe.utils.nowdate()
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            si.customer AS customer,
+            COALESCE(MAX(c.customer_name), si.customer) AS customer_name,
+            COALESCE(SUM(si.outstanding_amount), 0) AS outstanding,
+            COALESCE(SUM(
+                CASE WHEN si.due_date < %s THEN si.outstanding_amount ELSE 0 END
+            ), 0) AS overdue,
+            MAX(
+                CASE WHEN si.due_date < %s AND si.outstanding_amount > 0
+                THEN DATEDIFF(%s, si.due_date) END
+            ) AS days_overdue
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabCustomer` c ON c.name = si.customer
+        WHERE si.docstatus = 1
+          AND si.company = %s
+          AND si.outstanding_amount != 0
+          {terr_sql}
+        GROUP BY si.customer
+        HAVING overdue > 0.01
+        ORDER BY overdue DESC
+        LIMIT %s
+        """,
+        tuple([today, today, today, company] + terr_params + [int(limit or 10)]),
+        as_dict=True,
+    )
+    # frappe db.sql with terr_params - fix param passing
+    out: list[dict] = []
+    for row in rows:
+        label = row.customer_name or row.customer or "Unknown"
+        amount = round(float(row.overdue or 0), 2)
+        point = _recv_chart_point(label, amount)
+        point["customer"] = row.customer
+        point["dimension_value"] = row.customer
+        days = int(row.days_overdue or 0)
+        if days > 0:
+            point["days"] = days
+            point["days_overdue"] = days
+        out.append(point)
+    return out
+
+
+def _recv_chart_payload(
+    company: Optional[str],
+    chart_key: str,
+    *,
+    limit: int = 10,
+    territory: Optional[str] = None,
+) -> dict:
+    dash = get_receivables_dashboard(company=company, territory=territory)
     if chart_key == "aging":
         series = _recv_aging_series(dash.get("buckets_total") or {})
         dimension = "aging_bucket"
@@ -427,7 +491,7 @@ def _recv_chart_payload(company: Optional[str], chart_key: str, *, limit: int = 
         series = _recv_top_customer_series(dash.get("rows") or [], limit=limit)
         dimension = "customer"
     elif chart_key == "overdue_customers":
-        series = _recv_overdue_customer_series(dash.get("rows") or [], limit=limit)
+        series = _recv_overdue_customer_series_si(company, limit=limit, territory=territory)
         dimension = "customer"
     else:
         frappe.throw(f"Unsupported receivables chart: {chart_key}")
@@ -463,10 +527,15 @@ def get_receivables_top_customers_chart(company: Optional[str] = None, limit: Op
 
 
 @frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
-def get_receivables_overdue_customers_chart(company: Optional[str] = None, limit: Optional[int] = None):
+def get_receivables_overdue_customers_chart(
+    company: Optional[str] = None,
+    limit: Optional[int] = None,
+    territory: Optional[str] = None,
+):
     company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
     limit = _to_int(_get_arg("limit", limit), 10)
-    return _recv_chart_payload(company, "overdue_customers", limit=limit)
+    territory = _get_arg("territory", territory)
+    return _recv_chart_payload(company, "overdue_customers", limit=limit, territory=territory)
 
 
 def _recv_overdue_trend_series(company: Optional[str], months: int = 6) -> list[dict]:
@@ -1008,6 +1077,336 @@ def get_receivables_trends(company: Optional[str] = None,
         ],
     }
 
+# -------- Territory receivables customer list (mobile drill-down) --------
+
+
+def _parse_bool_arg(value, default=False):
+	if value is None:
+		return default
+	if isinstance(value, bool):
+		return value
+	return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+_TERRITORY_LIST_SUMMARY_CACHE_TTL = 120
+
+
+def _territory_list_sort_sql(sort: str, as_of_date) -> str:
+	sort = (sort or "outstanding_desc").strip().lower()
+	age = "COALESCE(si.due_date, si.posting_date)"
+	if sort == "overdue_desc":
+		return f"""SUM(CASE WHEN {age} < %s THEN si.outstanding_amount ELSE 0 END) DESC,
+			customer_name ASC"""
+	if sort == "name_asc":
+		return "customer_name ASC"
+	if sort == "outstanding_asc":
+		return "SUM(si.outstanding_amount) ASC, customer_name ASC"
+	return "SUM(si.outstanding_amount) DESC, customer_name ASC"
+
+
+def _territory_list_summary_cache_key(company: str, territory: str, as_of) -> str:
+	return f"recv_terr_sum:{company}:{territory}:{as_of}"
+
+
+def _fetch_territory_receivables_page(
+	company: str,
+	territory: str,
+	*,
+	limit: int,
+	offset: int,
+	sort: str,
+	as_of,
+	include_summary: bool,
+	include_row_detail: bool = False,
+):
+	"""Single territory open-AR page (Customer.territory + SI outstanding)."""
+	age = "COALESCE(si.due_date, si.posting_date)"
+	base_from = """
+		FROM `tabSales Invoice` si
+		INNER JOIN `tabCustomer` c ON c.name = si.customer AND c.territory = %s
+		WHERE si.docstatus = 1
+		  AND si.company = %s
+		  AND si.outstanding_amount != 0
+	"""
+	base_params = [territory, company]
+
+	agg_from = f"""
+		FROM (
+			SELECT
+				si.customer,
+				COALESCE(MAX(c.customer_name), si.customer) AS customer_name,
+				c.territory AS territory,
+				SUM(si.outstanding_amount) AS outstanding,
+				SUM(CASE WHEN {age} < %s THEN si.outstanding_amount ELSE 0 END) AS overdue
+			{base_from}
+			GROUP BY si.customer, c.territory
+			HAVING SUM(si.outstanding_amount) > 0.01
+		) agg
+	"""
+
+	summary_block = None
+	total_customers = 0
+	cache_key = _territory_list_summary_cache_key(company, territory, as_of)
+	cached = frappe.cache.get_value(cache_key) if include_summary and offset == 0 else None
+
+	if cached and isinstance(cached, dict):
+		total_customers = int(cached.get("total_customers") or 0)
+		summary_block = cached.get("summary")
+	elif include_summary and offset == 0:
+		summary_row = frappe.db.sql(
+			f"""
+			SELECT
+				COUNT(*) AS total_customers,
+				COALESCE(SUM(outstanding), 0) AS total_outstanding,
+				COALESCE(SUM(overdue), 0) AS total_overdue
+			{agg_from}
+			""",
+			tuple([as_of] + base_params),
+			as_dict=True,
+		)[0]
+		total_customers = int(summary_row.total_customers or 0)
+		total_out = round(float(summary_row.total_outstanding or 0), 2)
+		total_od = round(float(summary_row.total_overdue or 0), 2)
+		summary_block = {
+			"total_outstanding": total_out,
+			"total_overdue": total_od,
+			"total_current": round(max(0.0, total_out - total_od), 2),
+		}
+		frappe.cache.set_value(
+			cache_key,
+			{"total_customers": total_customers, "summary": summary_block},
+			expires_in_sec=_TERRITORY_LIST_SUMMARY_CACHE_TTL,
+		)
+	elif offset == 0:
+		total_customers = int(
+			frappe.db.sql(
+				f"SELECT COUNT(*) AS n {agg_from}",
+				tuple([as_of] + base_params),
+				as_dict=True,
+			)[0].n
+			or 0
+		)
+
+	sort_sql = _territory_list_sort_sql(sort, as_of)
+	order_params = [as_of] if (sort or "").strip().lower() == "overdue_desc" else []
+
+	detail_select = ""
+	detail_params: list = []
+	if include_row_detail:
+		detail_select = f""",
+			MAX(
+				CASE
+					WHEN {age} < %s AND si.outstanding_amount > 0
+					THEN DATEDIFF(%s, {age})
+				END
+			) AS days_overdue,
+			MIN(
+				CASE WHEN si.outstanding_amount > 0 THEN {age} END
+			) AS oldest_due_date"""
+		detail_params = [as_of, as_of]
+
+	customer_rows = frappe.db.sql(
+		f"""
+		SELECT
+			si.customer AS customer_id,
+			COALESCE(MAX(c.customer_name), si.customer) AS customer_name,
+			c.territory AS territory,
+			SUM(si.outstanding_amount) AS outstanding,
+			SUM(CASE WHEN {age} < %s THEN si.outstanding_amount ELSE 0 END) AS overdue
+			{detail_select}
+		{base_from}
+		GROUP BY si.customer, c.territory
+		HAVING SUM(si.outstanding_amount) > 0.01
+		ORDER BY {sort_sql}
+		LIMIT %s OFFSET %s
+		""",
+		tuple([as_of] + detail_params + base_params + order_params + [limit, offset]),
+		as_dict=True,
+	)
+
+	customers = []
+	for row in customer_rows:
+		outstanding = round(float(row.outstanding or 0), 2)
+		overdue = round(float(row.overdue or 0), 2)
+		current = round(max(0.0, outstanding - overdue), 2)
+		entry = {
+			"customer_id": row.customer_id,
+			"customer_name": row.customer_name,
+			"customer": row.customer_id,
+			"outstanding": outstanding,
+			"outstanding_amount": outstanding,
+			"overdue": overdue,
+			"overdue_amount": overdue,
+			"current": current,
+			"territory": row.territory,
+		}
+		if include_row_detail:
+			if row.days_overdue is not None:
+				entry["days_overdue"] = int(row.days_overdue)
+			if row.oldest_due_date:
+				entry["oldest_due_date"] = str(row.oldest_due_date)
+		customers.append(entry)
+
+	page_len = len(customers)
+	if offset > 0 and not include_summary:
+		has_more = page_len >= limit
+		total_customers = 0
+	else:
+		has_more = (offset + page_len) < total_customers if total_customers else page_len >= limit
+
+	return {
+		"customers": customers,
+		"total_customers": total_customers,
+		"has_more": has_more,
+		"summary": summary_block,
+	}
+
+
+def _legacy_territory_receivables_payload(
+	company: str,
+	territory: str,
+	page: dict,
+	*,
+	limit: int,
+	offset: int,
+	sort: str,
+):
+	"""Map fast list page to legacy get_territory_receivables response shape."""
+	summary = page.get("summary") or {}
+	total_out = float(summary.get("total_outstanding") or 0)
+	total_od = float(summary.get("total_overdue") or 0)
+	total_cur = float(summary.get("total_current") or max(0.0, total_out - total_od))
+	legacy_customers = []
+	for row in page.get("customers") or []:
+		cur = float(row.get("current") or 0)
+		od = float(row.get("overdue") or 0)
+		legacy_customers.append(
+			{
+				"customer": row["customer_id"],
+				"customer_name": row["customer_name"],
+				"outstanding_amount": row["outstanding"],
+				"aging": {
+					"Current": cur,
+					"1-30 Days": od,
+					"31-60 Days": 0.0,
+					"61-90 Days": 0.0,
+					"91-120 Days": 0.0,
+					"Old Balance": 0.0,
+				},
+			}
+		)
+	return {
+		"territory": territory,
+		"territories": [territory],
+		"summary": {
+			"totalUnpaid": total_out,
+			"totalOverdue": total_od,
+			"aging": {
+				"Current": total_cur,
+				"1-30 Days": total_od,
+				"31-60 Days": 0.0,
+				"61-90 Days": 0.0,
+				"91-120 Days": 0.0,
+				"Old Balance": 0.0,
+			},
+		},
+		"customers": legacy_customers,
+		"pagination": {
+			"total": int(page.get("total_customers") or 0),
+			"limit": limit,
+			"offset": offset,
+		},
+		"filters_applied": {"fast_path": True, "sort": sort},
+	}
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_territory_receivables_list(
+	company: Optional[str] = None,
+	territory: Optional[str] = None,
+	limit: Optional[int] = None,
+	offset: Optional[int] = None,
+	sort: Optional[str] = None,
+	as_of_date: Optional[str] = None,
+	include_summary: Optional[bool] = None,
+	include_detail: Optional[bool] = None,
+):
+	"""
+	Paginated open-AR customer list for one territory (mobile territory tap).
+
+	Totals use Customer.territory + Sales Invoice outstanding (aligned with receivables dashboard cards).
+	"""
+	from erp_analysis.services.statement_branding import wrap_mobile_message
+
+	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	territory = (_get_arg("territory", territory) or "").strip()
+	if not company:
+		frappe.throw("Company is required", frappe.ValidationError)
+	if not territory:
+		frappe.throw("Territory is required", frappe.ValidationError)
+
+	object_key = "erp_analysis.receivables.get_territory_receivables_list"
+	try:
+		employee = frappe.db.get_value("Employee", {"user_id": frappe.session.user}, "name")
+	except Exception:
+		employee = None
+	user_branch = frappe.db.get_value("Employee", employee, "branch") if employee else None
+
+	try:
+		decision = evaluate(
+			frappe.session.user,
+			company or "",
+			territory,
+			user_branch or None,
+			object_key,
+		)
+		if not decision.get("can_view"):
+			raise PermissionDenied
+	except PermissionDenied:
+		frappe.throw(
+			"Access denied: your Access Profile does not allow territory receivables list for this company/territory.",
+			frappe.PermissionError,
+		)
+
+	resolve_territory_scope(requested=territory, company=company, module="receivables")
+
+	limit = min(100, max(1, _to_int(_get_arg("limit", limit), 50)))
+	offset = max(0, _to_int(_get_arg("offset", offset), 0))
+	sort = _get_arg("sort", sort) or "outstanding_desc"
+	as_of = _to_date(_get_arg("as_of_date", as_of_date)) or frappe.utils.getdate()
+	include_summary = _parse_bool_arg(_get_arg("include_summary", include_summary), default=(offset == 0))
+	include_row_detail = _parse_bool_arg(_get_arg("include_detail", include_detail), default=False)
+
+	currency = frappe.db.get_value("Company", company, "default_currency") or "SAR"
+	page = _fetch_territory_receivables_page(
+		company,
+		territory,
+		limit=limit,
+		offset=offset,
+		sort=sort,
+		as_of=as_of,
+		include_summary=include_summary,
+		include_row_detail=include_row_detail,
+	)
+
+	meta = {
+		"company": company,
+		"territory": territory,
+		"currency": currency,
+		"as_of_date": str(as_of),
+		"total_customers": page["total_customers"],
+		"limit": limit,
+		"offset": offset,
+		"has_more": page["has_more"],
+		"sort": sort,
+	}
+	if page.get("summary") is not None:
+		meta["summary"] = page["summary"]
+
+	payload = {"meta": meta, "customers": page["customers"]}
+	return wrap_mobile_message(payload)
+
+
 # apps/erp_analysis/erp_analysis/receivables.py
 
 
@@ -1075,6 +1474,37 @@ def get_territory_receivables(
         amount_threshold = float(amount_threshold)
     except Exception:
         amount_threshold = 100.0
+
+    # Fast path: same data as get_territory_receivables_list (mobile / default filters).
+    if (
+        final_territory
+        and str(amount_cmp or "gt").lower() == "gt"
+        and float(amount_threshold or 100) <= 100
+    ):
+        sort_map = {
+            "amount_desc": "outstanding_desc",
+            "amount_asc": "outstanding_asc",
+            "name_asc": "name_asc",
+        }
+        list_sort = sort_map.get(str(sort or "amount_desc").lower(), "outstanding_desc")
+        page = _fetch_territory_receivables_page(
+            company,
+            final_territory,
+            limit=min(100, max(1, limit)),
+            offset=max(0, offset),
+            sort=list_sort,
+            as_of=frappe.utils.getdate(),
+            include_summary=(offset == 0),
+            include_row_detail=False,
+        )
+        return _legacy_territory_receivables_payload(
+            company,
+            final_territory,
+            page,
+            limit=limit,
+            offset=offset,
+            sort=str(sort or "amount_desc"),
+        )
 
     # ---- Territory filter on Sales Invoice.territory (Access Profile scope) ----
     territory_join = ""
@@ -1648,7 +2078,10 @@ def get_customer_statement(company=None, customer=None, from_date=None, to_date=
 
     html_parts.append("</tbody></table></div>")
 
-    return {
+    from erp_analysis.services.statement_branding import build_statement_branding, wrap_mobile_message
+
+    branding = build_statement_branding(company, customer)
+    payload = {
         "customer": customer,
         "company": company,
         "from_date": from_date,
@@ -1666,4 +2099,23 @@ def get_customer_statement(company=None, customer=None, from_date=None, to_date=
             for r in rows
         ],
         "html": "".join(html_parts),
+        "branding": branding,
+        **branding,
     }
+    return wrap_mobile_message(payload)
+
+
+@frappe.whitelist(allow_guest=False, methods=["GET", "POST"])
+def get_statement_branding(company=None, customer=None, customer_name=None, **kwargs):
+    """Alias for mobile — same branding as ``customer_notifications.get_statement_branding``."""
+    from erp_analysis.services.statement_branding import build_statement_branding, wrap_mobile_message
+
+    customer = customer or customer_name or _get_arg("customer") or _get_arg("customer_name")
+    company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+    if customer:
+        cust_territory = frappe.db.get_value("Customer", customer, "territory")
+        from erp_analysis.permissions.access_profile import bypass_view_territories
+
+        if not bypass_view_territories("receivables", company=company):
+            assert_document_territory_allowed(cust_territory, company=company, purpose="view")
+    return wrap_mobile_message(build_statement_branding(company, customer))

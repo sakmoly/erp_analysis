@@ -98,6 +98,72 @@ class TestMobileWidgets(FrappeTestCase):
 		self.assertEqual(result["meta"]["next_dimension"], "salesperson")
 		self.assertTrue(result["meta"]["drillable"])
 
+	def test_drill_depth_overrides_stale_dimension_param(self):
+		from erp_analysis.services.mobile_widgets import get_dashboard_widget_data
+
+		widget = {
+			"key": "sales_by_division",
+			"label": "Sales By Division",
+			"widget_type": "RANKING",
+			"module_key": "sales",
+			"metric_key": "net_sales",
+			"dimension_key": "division",
+			"config": {"drill_path": ["division", "sub_group", "brand"]},
+		}
+		with patch(
+			"erp_analysis.services.mobile_widgets.resolve_widget_definition",
+			return_value=widget,
+		), patch(
+			"erp_analysis.services.mobile_widgets.guard_mobile_api",
+			return_value={"user": frappe.session.user, "company": "Test Co"},
+		), patch(
+			"erp_analysis.services.analytics_sales.get_sales_analysis",
+			return_value={"data": [], "meta": {"filters": {}, "schema_version": 1}},
+		) as mock_analysis:
+			get_dashboard_widget_data(
+				user=frappe.session.user,
+				widget_key="sales_by_division",
+				dimension="sub_group",
+				drill_depth=2,
+				filters={"division": ["Industrial"], "sub_group": ["Industrial Consumables"]},
+			)
+
+		self.assertEqual(mock_analysis.call_args.kwargs["dimension"], "brand")
+
+	def test_brand_drill_without_sub_group_is_empty(self):
+		from erp_analysis.services.mobile_widgets import get_dashboard_widget_data
+
+		widget = {
+			"key": "sales_by_division",
+			"label": "Sales By Division",
+			"widget_type": "RANKING",
+			"module_key": "sales",
+			"metric_key": "net_sales",
+			"dimension_key": "division",
+			"config": {"drill_path": ["division", "sub_group", "brand"]},
+		}
+		with patch(
+			"erp_analysis.services.mobile_widgets.resolve_widget_definition",
+			return_value=widget,
+		), patch(
+			"erp_analysis.services.mobile_widgets.guard_mobile_api",
+			return_value={"user": frappe.session.user, "company": "Test Co"},
+		), patch(
+			"erp_analysis.services.analytics_sales.get_sales_analysis",
+			return_value={"data": [{"label": "Hitachi", "dimension_value": "Hitachi", "metric_value": 9e6}],
+			 "meta": {"filters": {"division": ["Industrial"]}, "schema_version": 1}},
+		) as mock_analysis:
+			result = get_dashboard_widget_data(
+				user=frappe.session.user,
+				widget_key="sales_by_division",
+				dimension="brand",
+				filters={"division": ["Industrial"]},
+			)
+
+		mock_analysis.assert_not_called()
+		self.assertEqual(result["meta"].get("empty_state"), "missing_drill_filter")
+		self.assertEqual(result["table"]["rows"], [])
+
 	def test_drill_depth_selects_dimension_from_config(self):
 		from erp_analysis.services.mobile_widgets import get_dashboard_widget_data
 
@@ -247,7 +313,17 @@ class TestMobileWidgets(FrappeTestCase):
 			return_value={"user": frappe.session.user, "company": None},
 		), patch(
 			"erp_analysis.services.analytics_sales.get_sales_analysis",
-			return_value={"data": [], "meta": {"filters": {}}},
+			return_value={
+				"data": [
+					{
+						"dimension_value": "NIKE",
+						"label": "NIKE",
+						"metric_value": 100.0,
+						"rank": 1,
+					}
+				],
+				"meta": {"filters": {"territory": ["Jeddah"]}, "dimension": "brand"},
+			},
 		):
 			result = get_dashboard_widget_data(
 				user=frappe.session.user,
@@ -257,6 +333,9 @@ class TestMobileWidgets(FrappeTestCase):
 
 		self.assertIn("table", result)
 		self.assertEqual(result["meta"]["render_hint"], "table")
+		self.assertIn("chart", result)
+		self.assertEqual(len(result["chart"]["series"]), 1)
+		self.assertEqual(result["chart"]["series"][0]["label"], "NIKE")
 
 	def test_batch_board_data_endpoint_whitelisted(self):
 		method = frappe.get_attr("erp_analysis.api.get_dashboard_board_data")
@@ -408,3 +487,81 @@ class TestMobileWidgets(FrappeTestCase):
 		self.assertEqual(result["value"], 12823395.87)
 		self.assertEqual(result["value_ly"], 15200000.0)
 		self.assertEqual(result["meta"]["format"], "currency_compact")
+
+	def test_inventory_overview_kpis_use_distinct_module_metrics(self):
+		from erp_analysis.services.mobile_widgets import _kpi_widget_payload
+
+		mock_kpis = {
+			"value": 15865556.33,
+			"stock_qty": 2450000,
+			"available_value": 12000000,
+			"reserved_value": 3870000,
+			"turnover": 4.2,
+			"days_of_inventory": 68,
+			"low_stock_count": 12,
+			"non_moving_count": 34,
+		}
+		widgets = [
+			("inventory_total_value_kpi", "inventory_value", "currency_compact"),
+			("inventory_stock_qty_kpi", "stock_qty", "integer"),
+			("inventory_available_value_kpi", "available_value", "currency_compact"),
+			("inventory_reserved_value_kpi", "reserved_value", "currency_compact"),
+			("inventory_turnover_kpi", "turnover", "decimal"),
+			("inventory_days_kpi", "days_of_inventory", "integer"),
+		]
+		with patch(
+			"erp_analysis.services.module_kpis.get_inventory_summary_kpis",
+			return_value=mock_kpis,
+		), patch(
+			"erp_analysis.services.stock_cover.get_stock_cover_payload",
+			return_value={"kpis": {"avg_cover_days": 68}},
+		):
+			for key, metric, fmt in widgets:
+				payload = _kpi_widget_payload(
+					frappe.session.user,
+					"Printechs Advanced Printing Trading Co.",
+					{
+						"key": key,
+						"label": key,
+						"widget_type": "KPI",
+						"module_key": "inventory",
+						"metric_key": metric,
+						"config": {"format": fmt},
+					},
+					None,
+					None,
+				)
+				kpi = payload["kpi"]
+				self.assertEqual(kpi["metric"], metric, key)
+				self.assertIsNone(kpi.get("value_ly"), key)
+				self.assertEqual(kpi["format"], fmt, key)
+				if metric == "stock_qty":
+					self.assertEqual(payload.get("stock_qty"), mock_kpis["stock_qty"])
+				if metric == "available_value":
+					self.assertEqual(payload.get("available_value"), mock_kpis["available_value"])
+
+		values = {}
+		with patch(
+			"erp_analysis.services.module_kpis.get_inventory_summary_kpis",
+			return_value=mock_kpis,
+		), patch(
+			"erp_analysis.services.stock_cover.get_stock_cover_payload",
+			return_value={"kpis": {"avg_cover_days": 68}},
+		):
+			for key, metric, _fmt in widgets:
+				payload = _kpi_widget_payload(
+					frappe.session.user,
+					"Printechs Advanced Printing Trading Co.",
+					{
+						"key": key,
+						"widget_type": "KPI",
+						"module_key": "inventory",
+						"metric_key": metric,
+						"config": {},
+					},
+					None,
+					None,
+				)
+				values[key] = payload["kpi"]["value"]
+
+		self.assertEqual(len(set(values.values())), len(values))

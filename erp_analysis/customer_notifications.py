@@ -2,14 +2,37 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import typing as t
+from contextlib import contextmanager
 
 import frappe
 from frappe import _
+from frappe.utils.file_manager import save_file
 from frappe.utils.pdf import get_pdf
 from datetime import datetime, timedelta
-from frappe.utils import nowdate, date_diff, flt
+from frappe.utils import nowdate, date_diff, flt, getdate, add_days
+
+from erp_analysis.permissions.access_profile import assert_document_territory_allowed, bypass_view_territories
+from erp_analysis.services.statement_branding import (
+	SOA_PRINT_FORMAT,
+	build_statement_branding,
+	wrap_mobile_message,
+)
+from erp_analysis.utils.rpc import (
+	absolute_file_url,
+	clean_kwargs,
+	expand_rpc_kwargs,
+	get_arg,
+	get_date_arg,
+)
+
+SOA_PDF_OBJECT_KEYS = (
+	"erp_analysis.customer_notifications.get_statement_pdf",
+	"printechs_utility.customer_notifications.get_statement_pdf",
+)
+
 # =========================
 # PUBLIC API ENDPOINTS
 # =========================
@@ -46,8 +69,207 @@ def get_email_list(customer_name: str) -> list[str]:
     return emails
 
 
-@frappe.whitelist()
-def send_statement_pdf(customer_name: str):
+def _resolve_statement_customer(customer_name=None, customer=None) -> str:
+    name = (customer_name or customer or get_arg("customer_name") or get_arg("customer") or "").strip()
+    if not name:
+        frappe.throw(_("Customer is required"))
+    if not frappe.db.exists("Customer", name):
+        frappe.throw(_("Customer {0} not found").format(name))
+    return name
+
+
+def _assert_statement_territory_access(customer_name: str, company: str | None) -> str:
+    company = company or frappe.defaults.get_user_default("Company")
+    cust_territory = frappe.db.get_value("Customer", customer_name, "territory")
+    if not bypass_view_territories("receivables", company=company):
+        assert_document_territory_allowed(cust_territory, company=company, purpose="view")
+    return company
+
+
+def _enforce_soa_pdf_api_access(company: str | None) -> bool:
+	"""
+	Access Profile users must have ``get_statement_pdf`` on their profile and pass territory checks
+	(see ``_assert_statement_territory_access``). They may lack ERPNext Customer print role.
+
+	Users **without** an Access Profile keep standard desk rules: Customer ``print`` permission required.
+
+	Returns True when profile governs the call (controlled print bypass). Raises PermissionError when
+	a profile exists but the API object is not permitted.
+	"""
+	from erp_analysis.permissions.access_profile import PermissionDenied, _get_user_profile_name, evaluate
+
+	user = frappe.session.user
+	company = company or frappe.defaults.get_user_default("Company")
+	if not _get_user_profile_name(user, company):
+		return False
+
+	for object_key in SOA_PDF_OBJECT_KEYS:
+		try:
+			if evaluate(user, company, None, None, object_key).get("can_view"):
+				return True
+		except PermissionDenied:
+			continue
+
+	frappe.throw(
+		_("Access denied for {0}").format(SOA_PDF_OBJECT_KEYS[0]),
+		frappe.PermissionError,
+	)
+
+
+def _default_statement_dates(from_date=None, to_date=None) -> tuple[str, str]:
+    to_date = get_date_arg("to_date", default=to_date) or str(nowdate())
+    from_date = get_date_arg("from_date", default=from_date)
+    if not from_date:
+        from_date = str(getdate(add_days(to_date, -90)))
+    return str(from_date), str(to_date)
+
+
+@frappe.whitelist(allow_guest=False, methods=["GET", "POST"])
+def get_statement_branding(
+    customer_name: str | None = None,
+    company: str | None = None,
+    customer: str | None = None,
+    **kwargs,
+):
+    """Letterhead + bank footer for mobile on-device SOA PDF (matches desk SOA print format)."""
+    expand_rpc_kwargs(kwargs)
+    customer_name = _resolve_statement_customer(customer_name, customer or get_arg("customer"))
+    company = get_arg("company", default=company) or frappe.defaults.get_user_default("Company")
+    company = _assert_statement_territory_access(customer_name, company)
+    return wrap_mobile_message(build_statement_branding(company, customer_name))
+
+
+def _resolve_soa_print_format(default: str | None = None) -> str:
+	pf = get_arg("print_format", default=default) or default or SOA_PRINT_FORMAT
+	if not frappe.db.exists("Print Format", pf):
+		frappe.throw(_("Print Format {0} not found").format(pf))
+	return pf
+
+
+def _build_statement_pdf_payload(
+	customer_name: str,
+	company: str,
+	from_date: str,
+	to_date: str,
+	print_format: str | None = None,
+	return_pdf: bool = False,
+	return_file_url: bool = True,
+	profile_governed: bool = False,
+) -> dict:
+	"""Desk-equivalent SOA PDF for mobile share (no email). Dates are metadata only."""
+	print_format = print_format or _resolve_soa_print_format()
+	pdf, fname, soa_meta = _generate_customer_soa_pdf(
+		customer_name,
+		company=company,
+		print_format=print_format,
+		profile_governed=profile_governed,
+		privileged_soa_render=True,
+	)
+	branding = build_statement_branding(company, customer_name)
+	payload: dict = {
+		"filename": fname,
+		"customer_name": customer_name,
+		"company": company,
+		"from_date": from_date,
+		"to_date": to_date,
+		"print_format": print_format,
+		"statement_pdf_scope": "outstanding_invoices",
+		"requested_period": {"from_date": from_date, "to_date": to_date},
+		"soa_body_present": soa_meta.get("soa_body_present"),
+		"soa_pdf_verified": bool(soa_meta.get("soa_body_present")),
+		"outstanding_invoice_count": soa_meta.get("outstanding_invoice_count"),
+		"branding": branding,
+		**branding,
+	}
+	if return_file_url:
+		file_doc = save_file(fname, pdf, "Customer", customer_name, is_private=1)
+		payload["file_url"] = file_doc.file_url
+		payload["pdf_url"] = absolute_file_url(file_doc.file_url)
+	if return_pdf:
+		payload["pdf_base64"] = base64.b64encode(pdf).decode("ascii")
+	if not return_file_url and not return_pdf:
+		file_doc = save_file(fname, pdf, "Customer", customer_name, is_private=1)
+		payload["file_url"] = file_doc.file_url
+		payload["pdf_url"] = absolute_file_url(file_doc.file_url)
+	return payload
+
+
+@frappe.whitelist(allow_guest=False, methods=["GET", "POST"])
+def get_statement_pdf(
+    customer_name: str | None = None,
+    company: str | None = None,
+    customer: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    print_format: str | None = None,
+    return_pdf: int | str | None = None,
+    return_file_url: int | str | None = None,
+    send_email: int | str | None = None,
+    **kwargs,
+):
+    """
+    Generate customer SOA PDF for mobile share (WhatsApp, Mail, etc.).
+    Uses desk print format ``Customer Outstanding SOA`` (current outstanding invoices).
+    Does not send email. ``from_date`` / ``to_date`` are metadata only.
+    """
+    expand_rpc_kwargs(kwargs)
+    customer_name = _resolve_statement_customer(
+        customer_name, customer or get_arg("customer")
+    )
+    company = get_arg("company", default=company) or frappe.defaults.get_user_default("Company")
+    profile_governed = _enforce_soa_pdf_api_access(company)
+    company = _assert_statement_territory_access(customer_name, company)
+    from_date, to_date = _default_statement_dates(from_date, to_date)
+    print_format = _resolve_soa_print_format(print_format or SOA_PRINT_FORMAT)
+    want_pdf = frappe.utils.cint(get_arg("return_pdf", default=return_pdf))
+    want_file = get_arg("return_file_url", default=return_file_url)
+    if want_file is None or want_file == "":
+        want_file_url = True
+    else:
+        want_file_url = bool(frappe.utils.cint(want_file))
+
+    payload = _build_statement_pdf_payload(
+        customer_name,
+        company,
+        from_date,
+        to_date,
+        print_format=print_format,
+        return_pdf=bool(want_pdf),
+        return_file_url=want_file_url,
+        profile_governed=profile_governed,
+    )
+    return wrap_mobile_message(payload)
+
+
+@frappe.whitelist(allow_guest=False, methods=["GET", "POST"])
+def send_statement_pdf(
+    customer_name: str | None = None,
+    send_email=1,
+    return_pdf=0,
+    company: str | None = None,
+    customer: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    print_format: str | None = None,
+    **kwargs,
+):
+    expand_rpc_kwargs(kwargs)
+    customer_name = _resolve_statement_customer(
+        customer_name, customer or get_arg("customer")
+    )
+    send_email = frappe.utils.cint(get_arg("send_email", default=send_email))
+    return_pdf = frappe.utils.cint(get_arg("return_pdf", default=return_pdf))
+    if not send_email or return_pdf:
+        return get_statement_pdf(
+            customer_name=customer_name,
+            company=get_arg("company", default=company),
+            customer=customer,
+            from_date=get_arg("from_date", default=from_date),
+            to_date=get_arg("to_date", default=to_date),
+            print_format=get_arg("print_format", default=print_format),
+            return_pdf=return_pdf,
+            send_email=0,
+        )
     # --- 1) Customer & recipients -------------------------------------------
     customer = frappe.get_doc("Customer", customer_name)
 
@@ -69,11 +291,9 @@ def send_statement_pdf(customer_name: str):
     full_name, mobile = frappe.get_value("User", user_email, ["full_name", "mobile_no"])
 
     # --- 2) Generate the SOA PDF (your existing print format) ----------------
-    try:
-        html = frappe.get_print("Customer", customer_name, print_format="Customer Outstanding SOA")
-    except frappe.DoesNotExistError:
-        html = frappe.get_print("Customer", customer_name)
-    pdf = get_pdf(html)
+    pdf, pdf_fname, _soa_meta = _generate_customer_soa_pdf(
+        customer_name, print_format=SOA_PRINT_FORMAT
+    )
 
     # Optionally: a public print URL with signature (no login)
     site_url = frappe.utils.get_url()
@@ -237,7 +457,7 @@ def send_statement_pdf(customer_name: str):
         cc=cc_list,
         subject=f"Your Statement of Account - {customer_name}",
         message=body,
-        attachments=[{"fname": f"Statement_of_Account_{customer_name}.pdf", "fcontent": pdf}],
+        attachments=[{"fname": pdf_fname, "fcontent": pdf}],
         reference_doctype="Customer",
         reference_name=customer_name,
         sender="Notifications <support@printechs.com>",
@@ -295,7 +515,7 @@ def OLDsend_statement_pdf(customer_name: str):
         _check_rate_limit(customer_name, "statement_pdf", max_calls=20, window_minutes=60)
 
         # PDF (SOA)
-        pdf, pdf_filename = _generate_customer_soa_pdf(customer_name)
+        pdf, pdf_filename, _soa_meta = _generate_customer_soa_pdf(customer_name)
 
         # Recipients / CC
         recipients = _get_validated_recipients(customer_name)
@@ -739,19 +959,97 @@ def _log_communication(recipients: list[str], subject: str, doctype: str, name: 
         "status": "Completed"
     }).insert(ignore_permissions=True)
     
-# --- ADD THIS helper somewhere at module level (not nested) ---
+@contextmanager
+def _privileged_print_format_queries():
+	"""Print Format Jinja uses ``frappe.get_list``; mobile users lack SI read role."""
+	orig_list = frappe.get_list
+	orig_all = frappe.get_all
 
-def _generate_customer_soa_pdf(customer_name: str) -> tuple[bytes, str]:
-    """Generate Statement of Account PDF for a Customer.
-    Tries a custom print format 'Customer Outstanding SOA', falls back to default Customer print.
-    Returns (pdf_bytes, filename)."""
-    try:
-        html = frappe.get_print("Customer", customer_name, print_format="Customer Outstanding SOA")
-    except Exception:
-        # fallback to default print
-        html = frappe.get_print("Customer", customer_name)
+	def get_list(doctype, *args, **kwargs):
+		kwargs["ignore_permissions"] = True
+		return orig_list(doctype, *args, **kwargs)
 
-    pdf = get_pdf(html)  # requires: from frappe.utils.pdf import get_pdf
-    filename = f"Statement_of_Account_{customer_name}.pdf"
-    return pdf, filename
+	def get_all(doctype, *args, **kwargs):
+		kwargs["ignore_permissions"] = True
+		return orig_all(doctype, *args, **kwargs)
+
+	frappe.get_list = get_list
+	frappe.get_all = get_all
+	try:
+		yield
+	finally:
+		frappe.get_list = orig_list
+		frappe.get_all = orig_all
+
+
+def _soa_html_has_body(html: str | None) -> bool:
+	return bool(html and "Statement Of Account" in html)
+
+
+def _count_outstanding_soa_invoices(customer_name: str) -> int:
+	"""Same threshold as Print Format ``Customer Outstanding SOA`` (outstanding > 10)."""
+	return frappe.db.count(
+		"Sales Invoice",
+		{
+			"docstatus": 1,
+			"customer": customer_name,
+			"outstanding_amount": (">", 10),
+		},
+	)
+
+
+def _render_soa_print_html(doc, print_format: str, *, privileged: bool) -> str:
+	"""Render desk SOA print format; ``privileged`` uses desk-equivalent data after API + territory checks."""
+	if not privileged:
+		doc.check_permission("print")
+		return frappe.get_print(doc=doc, print_format=print_format)
+
+	# Mobile users lack Customer print + Sales Invoice read; render exactly as desk (Administrator).
+	session_user = frappe.session.user
+	try:
+		frappe.set_user("Administrator")
+		admin_doc = frappe.get_doc("Customer", doc.name)
+		return frappe.get_print(doc=admin_doc, print_format=print_format)
+	finally:
+		frappe.set_user(session_user)
+
+
+def _generate_customer_soa_pdf(
+    customer_name: str,
+    company: str | None = None,
+    print_format: str | None = None,
+    *,
+    profile_governed: bool = False,
+    privileged_soa_render: bool = False,
+) -> tuple[bytes, str, dict]:
+    """Generate Statement of Account PDF (same as desk Print → Customer Outstanding SOA).
+
+    Outstanding invoice lines are not filtered by API ``from_date`` / ``to_date``.
+    When ``profile_governed`` is False (desk / email path), normal Customer ``print`` permission applies.
+    Returns (pdf_bytes, filename).
+    """
+    _ = company  # reserved for future multi-company print context
+    print_format = print_format or SOA_PRINT_FORMAT
+    doc = frappe.get_doc("Customer", customer_name)
+    privileged = bool(privileged_soa_render or profile_governed)
+    html = _render_soa_print_html(doc, print_format, privileged=privileged)
+    meta = {
+        "soa_body_present": _soa_html_has_body(html),
+        "outstanding_invoice_count": _count_outstanding_soa_invoices(customer_name),
+        "soa_render_privileged": privileged,
+    }
+    if privileged and not meta["soa_body_present"] and meta["outstanding_invoice_count"]:
+        frappe.log_error(
+            title="SOA PDF empty body",
+            message=f"customer={customer_name} invoices={meta['outstanding_invoice_count']}",
+        )
+        frappe.throw(
+            _("Statement PDF could not be generated (desk SOA data missing). Contact IT."),
+            frappe.ValidationError,
+        )
+
+    pdf = get_pdf(html)
+    safe_name = frappe.scrub(customer_name).replace("-", "_")
+    filename = f"Statement_of_Account_{safe_name}.pdf"
+    return pdf, filename, meta
 

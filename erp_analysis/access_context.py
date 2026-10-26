@@ -26,7 +26,11 @@ MODULE_API_HINTS: dict[str, tuple[str, ...]] = {
 		"erp_analysis.sales_kpis.get_sales_dashboard",
 		"erp_analysis.analytics.",
 	),
-	"executive": ("erp_analysis.executive.", "erp_analysis.dashboard.get_executive_dashboard"),
+	"executive": (
+		"erp_analysis.executive.",
+		"erp_analysis.dashboard.get_executive_dashboard",
+		"erp_analysis.tax.",
+	),
 	"collection": ("erp_analysis.collection.",),
 	"sales_performance": ("erp_analysis.sales_performance.", "erp_analysis.sales.get_salesperson"),
 	"sales_orders": ("erp_analysis.sales_orders.",),
@@ -85,13 +89,13 @@ def is_module_enabled_in_profile(
 	company: Optional[str] = None,
 ) -> bool:
 	"""True when no profile is linked (fallback) or profile enables the module."""
-	from erp_analysis.services.mobile_profile import get_profile_modules
+	from erp_analysis.services.mobile_profile import canonical_module_key, get_profile_modules
 
 	profile_name = resolve_mobile_app_profile_name(user=user, company=company)
 	if not profile_name:
 		return True
 
-	key = (module_key or "").strip().lower()
+	key = canonical_module_key(module_key)
 	for row in get_profile_modules(profile_name):
 		if (row.get("key") or "").lower() == key:
 			return bool(row.get("enabled"))
@@ -204,6 +208,26 @@ def _dashboard_module_allowed(module_key: str, allowed: set[str]) -> bool:
 	return bool(parent and parent in allowed)
 
 
+def has_module_access(
+	module_key: str,
+	user: Optional[str] = None,
+	company: Optional[str] = None,
+) -> bool:
+	"""True when the user may use APIs/widgets for this module_key."""
+	user = user or frappe.session.user
+	key = (module_key or "").strip().lower()
+	if not key:
+		return True
+	if not is_module_enabled_in_profile(key, user=user, company=company):
+		return False
+	allowed = _allowed_module_keys_for_access(user, company)
+	if allowed is None:
+		return True
+	if key in allowed:
+		return True
+	return _dashboard_module_allowed(key, allowed)
+
+
 def require_module_access(
 	module_key: str,
 	user: Optional[str] = None,
@@ -215,16 +239,7 @@ def require_module_access(
 	if not key:
 		return
 
-	if not is_module_enabled_in_profile(key, user=user, company=company):
-		frappe.throw(
-			_("Module {0} is not enabled for your mobile profile").format(key),
-			frappe.PermissionError,
-		)
-
-	allowed = _allowed_module_keys_for_access(user, company)
-	if allowed is not None and key not in allowed:
-		if _dashboard_module_allowed(key, allowed):
-			return
+	if not has_module_access(key, user=user, company=company):
 		frappe.throw(
 			_("Module {0} is not permitted by your Access Profile").format(key),
 			frappe.PermissionError,

@@ -59,11 +59,17 @@ def get_open_sales_orders(
 	pending_delivery_only: Optional[bool] = None,
 	limit: Optional[int] = None,
 	offset: Optional[int] = None,
+	filters: Optional[str] = None,
+	search: Optional[str] = None,
+	view_all_sales: Optional[int] = None,
+	**kwargs,
 ):
-	"""Paginated list of open sales orders."""
+	"""Paginated list of open sales orders (territory scope via filters / view_all_sales)."""
 	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
 	territory = _get_arg("territory", territory)
 	status = _get_arg("status", status)
+	filters = _get_arg("filters", filters)
+	search = _get_arg("search", search)
 	pending_delivery_only = _as_bool(_get_arg("pending_delivery_only", pending_delivery_only))
 	limit = _to_int(_get_arg("limit", limit), 50)
 	offset = _to_int(_get_arg("offset", offset), 0)
@@ -76,10 +82,42 @@ def get_open_sales_orders(
 			pending_delivery_only=pending_delivery_only,
 			limit=limit,
 			offset=offset,
+			user=frappe.session.user,
+			filters=filters,
+			search=search,
 		)
 	except Exception:
 		frappe.log_error(title="sales_orders.get_open_sales_orders", message=frappe.get_traceback())
 		return {"rows": [], "pagination": {"total": 0, "limit": limit, "offset": offset}}
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_open_sales_order_items(
+	company: Optional[str] = None,
+	sales_order: Optional[str] = None,
+	territory: Optional[str] = None,
+	filters: Optional[str] = None,
+	limit: Optional[int] = None,
+	**kwargs,
+):
+	"""Line items with pending qty for one open Sales Order."""
+	company = _get_arg("company", company) or frappe.defaults.get_user_default("Company")
+	sales_order = _get_arg("sales_order", sales_order)
+	filters = _get_arg("filters", filters)
+	limit = _to_int(_get_arg("limit", limit), 200)
+
+	try:
+		return sales_orders_service.get_open_sales_order_items(
+			user=frappe.session.user,
+			company=company,
+			sales_order=sales_order,
+			filters=filters,
+			limit=limit,
+			pending_lines_only=True,
+		)
+	except Exception:
+		frappe.log_error(title="sales_orders.get_open_sales_order_items", message=frappe.get_traceback())
+		return {"meta": {"sales_order": sales_order}, "items": []}
 
 
 @frappe.whitelist(methods=["GET", "POST"], allow_guest=False)

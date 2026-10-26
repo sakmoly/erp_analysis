@@ -373,14 +373,14 @@ export function useWidgetDrill(widget: DashboardWidget) {
       ? widget.config?.drill_path?.[stack.length] ?? data?.chart.dimension
       : widget.dimension_key;
 
-  async function load(levelFilters: DrillFilters = filters, dimension?: string) {
+  async function load(levelFilters: DrillFilters = filters, drillDepth?: number) {
     setLoading(true);
     try {
       const payload = await getDashboardWidgetData({
         widget_key: widget.key,
-        dimension,
-        drill_depth: dimension ? undefined : stack.length || undefined,
+        drill_depth: drillDepth ?? stack.length,
         filters: levelFilters,
+        drill_crumbs: stack,
         limit: 10,
       });
       setData(payload);
@@ -401,14 +401,15 @@ export function useWidgetDrill(widget: DashboardWidget) {
     };
     const nextDim = data.meta.next_dimension;
 
-    setStack((s) => [...s, { dimension: activeDim, label: point.label, value }]);
-    await load(nextFilters, nextDim);
+    const nextStack = [...stack, { dimension: activeDim, label: point.label, value: point.dimension_value ?? point.label }];
+    setStack(nextStack);
+    await load(nextFilters, nextStack.length);
   }
 
   async function goBack() {
     if (stack.length === 0) {
       setFilters({});
-      await load({}, widget.dimension_key);
+      await load({}, 0);
       return;
     }
     const newStack = stack.slice(0, -1);
@@ -416,10 +417,8 @@ export function useWidgetDrill(widget: DashboardWidget) {
     for (const entry of newStack) {
       newFilters[entry.dimension] = [entry.value];
     }
-    const depth = newStack.length;
-    const nextDimension = drillPath[depth] ?? widget.dimension_key;
     setStack(newStack);
-    await load(newFilters, nextDimension);
+    await load(newFilters, newStack.length);
   }
 
   return { data, loading, stack, load, onSliceTap, goBack };

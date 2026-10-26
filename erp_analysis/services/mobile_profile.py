@@ -12,6 +12,19 @@ from erp_analysis.services.mobile_dimensions import dimension_public_metadata, g
 
 PROFILE_DOCTYPE = "Mobile App Profile"
 
+# Normalize legacy / hand-edited Mobile App Module keys for access + mobile routes.
+MODULE_KEY_ALIASES: dict[str, str] = {
+	"approval": "approvals",
+}
+
+
+def canonical_module_key(module_key: str | None) -> str:
+	key = (module_key or "").strip().lower()
+	if not key:
+		return key
+	return MODULE_KEY_ALIASES.get(key, key)
+
+
 # Server-only widget config — omit from mobile bootstrap so the app uses batch payloads.
 _BOOTSTRAP_CONFIG_SKIP = frozenset(
 	{
@@ -111,15 +124,18 @@ def get_profile_modules(profile_name: str, *, enabled_only: bool = True) -> list
 	for row in doc.modules or []:
 		if enabled_only and not row.enabled:
 			continue
-		key = (row.module_key or "").strip()
-		if not key:
+		raw_key = (row.module_key or "").strip()
+		if not raw_key:
 			continue
+		key = canonical_module_key(raw_key)
+		route_raw = (row.route_key or raw_key or key).strip()
+		route_key = canonical_module_key(route_raw) or key
 		rows.append(
 			{
 				"key": key,
-				"label": row.label or key,
+				"label": row.label or raw_key,
 				"enabled": bool(row.enabled),
-				"route_key": row.route_key or key,
+				"route_key": route_key,
 				"icon_key": row.icon_key,
 				"screen_type": (getattr(row, "screen_type", None) or "module").strip().lower(),
 				"dashboard_id": (getattr(row, "dashboard_id", None) or "").strip() or None,

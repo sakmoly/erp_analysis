@@ -9,10 +9,41 @@ from typing import Any, Optional
 import frappe
 
 
+_RPC_NOISE = frozenset({"cmd", "method", "csrf_token", "args"})
+
+
 def clean_kwargs(kwargs: dict) -> dict:
-	for key in ("cmd", "method", "csrf_token", "args", "kwargs"):
+	for key in _RPC_NOISE | {"kwargs"}:
 		kwargs.pop(key, None)
 	return kwargs
+
+
+def expand_rpc_kwargs(kwargs: dict | None = None) -> dict:
+	"""Merge ``form_dict`` / JSON body into kwargs and strip Frappe RPC noise (avoids 417 from missing params)."""
+	out = dict(kwargs or {})
+	clean_kwargs(out)
+	for key, value in (frappe.form_dict or {}).items():
+		if key in _RPC_NOISE:
+			continue
+		if key not in out or out.get(key) in (None, ""):
+			out[key] = value
+	for nested_key in ("data", "kwargs"):
+		raw = out.get(nested_key) or (frappe.form_dict or {}).get(nested_key)
+		if not raw:
+			continue
+		try:
+			parsed = frappe.parse_json(raw) if isinstance(raw, str) else raw
+		except Exception:
+			continue
+		if not isinstance(parsed, dict):
+			continue
+		for key, value in parsed.items():
+			if key in _RPC_NOISE:
+				continue
+			if key not in out or out.get(key) in (None, ""):
+				out[key] = value
+		out.pop(nested_key, None)
+	return out
 
 
 def get_arg(name: str, default=None, overrides: Optional[dict] = None):

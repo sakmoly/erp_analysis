@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import frappe
+
 _CACHE: dict[tuple, dict[str, Any]] = {}
 
 
@@ -60,19 +62,29 @@ def warm_batch_kpi_cache(
 	if not metrics:
 		return
 
+	from erp_analysis.access_context import has_module_access
 	from erp_analysis.services.module_kpis import get_module_kpi, is_module_kpi
 
 	for module_key, metric_key in metrics:
 		if not is_module_kpi(module_key, metric_key):
 			continue
+		if not has_module_access(module_key, user=user, company=company):
+			continue
 		cache_metric = f"{module_key}:{metric_key}"
 		if get_cached_kpi(company, cache_metric, "mtd", None, "") is not None:
 			continue
-		kpi = get_module_kpi(
-			user=user,
-			company=company,
-			module_key=module_key,
-			metric_key=metric_key,
-			period="mtd",
-		)
+		try:
+			kpi = get_module_kpi(
+				user=user,
+				company=company,
+				module_key=module_key,
+				metric_key=metric_key,
+				period="mtd",
+			)
+		except Exception:
+			frappe.log_error(
+				title=f"warm_batch_kpi.{module_key}.{metric_key}",
+				message=frappe.get_traceback(),
+			)
+			continue
 		set_cached_kpi(company, cache_metric, "mtd", None, "", kpi)

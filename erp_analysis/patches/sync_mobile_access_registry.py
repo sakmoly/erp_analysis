@@ -8,6 +8,10 @@ from erp_analysis.permissions.access_profile import clear_caches
 
 # object_key, label
 MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
+	# Mobile v2 shell (bootstrap + batch boards)
+	("erp_analysis.api.get_mobile_bootstrap", "Mobile Bootstrap"),
+	("erp_analysis.api.get_dashboard_board_data", "Dashboard Board Batch Data"),
+	("erp_analysis.api.get_dashboard_widget_data", "Dashboard Widget Data"),
 	# Dashboard / sales home
 	("erp_analysis.dashboard.get_complete_dashboard_data", "Complete Dashboard"),
 	("erp_analysis.dashboard.get_executive_dashboard", "Executive Dashboard (dashboard alias)"),
@@ -21,6 +25,10 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	("erp_analysis.sales_performance.get_product_performance", "Product Performance"),
 	("erp_analysis.sales.get_salesperson_performance", "Salesperson Performance (sales alias)"),
 	("erp_analysis.sales.get_product_performance", "Product Performance (sales alias)"),
+	("erp_analysis.api.get_sales_by_division_drill", "Sales By Division Drill"),
+	("erp_analysis.sales.get_sales_by_division_drill", "Sales By Division Drill (sales alias)"),
+	("erp_analysis.sales.get_item_sales_qty", "Item Sales Qty (sales alias)"),
+	("erp_analysis.sales_performance.get_item_sales_qty", "Item Sales Qty"),
 	# Customer (mobile contract paths)
 	("erp_analysis.customer.search_customers", "Customer Search"),
 	("erp_analysis.customer.get_customer_360", "Customer 360 (mobile path)"),
@@ -29,6 +37,8 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	# Collection
 	("erp_analysis.collection.get_collection_dashboard", "Collection Dashboard"),
 	("erp_analysis.collection.get_collection_attention", "Collection Attention"),
+	("erp_analysis.collection.get_customer_advances", "Customer Advances"),
+	("erp_analysis.collection.get_customer_advances_customers_chart", "Customer Advances Ranking"),
 	# Receivables
 	("erp_analysis.receivables.get_receivables_snapshot", "Receivables Snapshot"),
 	("erp_analysis.receivables.get_receivables_performance", "Receivables Performance"),
@@ -41,6 +51,10 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	("erp_analysis.receivables.get_receivables_overdue_trend_chart", "Receivables Overdue Trend Chart"),
 	("erp_analysis.receivables.get_receivables_attention", "Receivables Attention"),
 	("erp_analysis.receivables.get_territory_receivables", "Receivables by Territory"),
+	(
+		"erp_analysis.receivables.get_territory_receivables_list",
+		"Territory Receivables Customer List (mobile)",
+	),
 	("erp_analysis.receivables.get_customer_statement", "Customer Statement"),
 	# Inventory
 	("erp_analysis.inventory.get_inventory_snapshot", "Inventory Snapshot"),
@@ -48,11 +62,13 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	("erp_analysis.inventory.get_inventory_trends", "Inventory Trends"),
 	("erp_analysis.inventory.get_inventory_risk", "Inventory Risk"),
 	("erp_analysis.inventory.get_inventory_hierarchy", "Inventory Hierarchy"),
+	("erp_analysis.inventory.get_item_stock_by_code", "Item Stock By Code"),
 	("erp_analysis.inventory.get_inventory_items", "Inventory Items"),
 	("erp_analysis.inventory.get_stock_cover", "Stock Cover"),
 	("erp_analysis.inventory.get_inventory_health", "Inventory Health"),
 	("erp_analysis.inventory.get_dead_stock", "Dead Stock"),
 	("erp_analysis.stock.get_inventory_hierarchy", "Inventory Hierarchy (stock alias)"),
+	("erp_analysis.stock.get_item_stock_by_code", "Item Stock By Code (stock alias)"),
 	("erp_analysis.stock.get_inventory_items", "Inventory Items (stock alias)"),
 	("printechs_utility.inventory.get_inventory_hierarchy", "Inventory Hierarchy (legacy)"),
 	("printechs_utility.inventory.get_inventory_snapshot", "Inventory Snapshot (legacy)"),
@@ -61,6 +77,7 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	("erp_analysis.sales_orders.get_order_book_dashboard", "Order Book Dashboard"),
 	("erp_analysis.sales_orders.get_sales_order_dashboard", "Sales Order Dashboard (mobile path)"),
 	("erp_analysis.sales_orders.get_open_sales_orders", "Open Sales Orders"),
+	("erp_analysis.sales_orders.get_open_sales_order_items", "Open Sales Order Items"),
 	# Payables / purchase
 	("erp_analysis.payables.get_payables_dashboard", "Payables Dashboard"),
 	("erp_analysis.payables.get_payment_planning", "Payment Planning"),
@@ -98,6 +115,12 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	("erp_analysis.catalogue.get_catalogue_flip_url", "Catalogue Flip URL"),
 	# Notifications
 	("erp_analysis.customer_notifications.send_statement_pdf", "Send Statement PDF"),
+	("erp_analysis.customer_notifications.get_statement_pdf", "Get Statement PDF (share)"),
+	("erp_analysis.customer_notifications.get_statement_branding", "SOA Branding (mobile)"),
+	("erp_analysis.receivables.get_statement_branding", "SOA Branding (receivables)"),
+	("printechs_utility.customer_notifications.get_statement_pdf", "Get Statement PDF (legacy)"),
+	("printechs_utility.customer_notifications.get_statement_branding", "SOA Branding (legacy)"),
+	("printechs_utility.customer_notifications.send_statement_pdf", "Send Statement PDF (legacy)"),
 )
 
 # Registry rows that should grant approve capability on Access Profile lines.

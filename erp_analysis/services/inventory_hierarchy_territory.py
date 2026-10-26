@@ -147,6 +147,7 @@ def get_territory_hierarchy(
 	warehouse: Optional[str] = None,
 	brand: Optional[str] = None,
 	item_group: Optional[str] = None,
+	item_code: Optional[str] = None,
 	limit: int = 100,
 ) -> Dict[str, Any]:
 	level = (level or "").strip().lower()
@@ -154,6 +155,7 @@ def get_territory_hierarchy(
 	warehouse = (warehouse or "").strip() or None
 	brand = brand.strip() if isinstance(brand, str) else brand
 	item_group = item_group.strip() if isinstance(item_group, str) else item_group
+	item_code = (item_code or "").strip() or None
 	limit = int(limit or 100)
 
 	# Parent warehouse on brand+ is a drill filter, not the only allowed WH
@@ -187,10 +189,17 @@ def get_territory_hierarchy(
 			frappe.throw(_("territory is required for level=warehouse"), frappe.ValidationError)
 		return _level_warehouse(company, territory, terr_scope, wh_scope)
 	if level == "brand":
-		if not territory or not warehouse:
-			frappe.throw(_("territory and warehouse are required for level=brand"), frappe.ValidationError)
-		_assert_warehouse_in_territory(warehouse, territory)
-		return _level_brand(company, territory, warehouse, wh_scope)
+		if not territory:
+			frappe.throw(_("territory is required for level=brand"), frappe.ValidationError)
+		if terr_scope is not None and territory not in set(terr_scope):
+			frappe.throw(
+				_("Access denied: territory '{0}' is outside your stock view").format(territory),
+				frappe.PermissionError,
+			)
+		if warehouse:
+			_assert_warehouse_in_territory(warehouse, territory)
+			return _level_brand(company, territory, warehouse, wh_scope)
+		return _level_brand_territory(company, territory, wh_scope, limit)
 	if level == "item_group":
 		if not territory or not warehouse or brand is None:
 			frappe.throw(
@@ -200,9 +209,23 @@ def get_territory_hierarchy(
 		_assert_warehouse_in_territory(warehouse, territory)
 		return _level_item_group(company, territory, warehouse, brand, wh_scope)
 	if level == "item":
-		if not territory or not warehouse or brand is None or not item_group:
+		if not territory:
+			frappe.throw(_("territory is required for level=item"), frappe.ValidationError)
+		if terr_scope is not None and territory not in set(terr_scope):
 			frappe.throw(
-				_("territory, warehouse, brand and item_group are required for level=item"),
+				_("Access denied: territory '{0}' is outside your stock view").format(territory),
+				frappe.PermissionError,
+			)
+		if item_code and not warehouse:
+			return _level_item_by_code(
+				company, territory, item_code, brand, wh_scope, limit
+			)
+		if not warehouse or brand is None or not item_group:
+			frappe.throw(
+				_(
+					"warehouse, brand and item_group are required for level=item "
+					"(or pass item_code without warehouse for stock by location)"
+				),
 				frappe.ValidationError,
 			)
 		_assert_warehouse_in_territory(warehouse, territory)
@@ -418,6 +441,78 @@ def _level_brand(
 	)
 
 
+def _level_brand_territory(
+	company: str,
+	territory: str,
+	wh_scope: Optional[List[str]],
+	limit: int,
+) -> Dict[str, Any]:
+	"""Brands with qty/value summed across all warehouses mapped to the territory."""
+	case_sql, case_params, _ = _territory_case_sql("w")
+	where_sql, where_params = _bin_base(company, wh_scope)
+	fetch = max(int(limit or 100), 1) + 1
+	params: List[Any] = (
+		[NO_BRAND, NO_BRAND, NO_BRAND]
+		+ list(case_params)
+		+ list(where_params)
+		+ [territory, NO_BRAND, fetch]
+	)
+
+	query = f"""
+		SELECT
+			COALESCE(NULLIF(i.brand, ''), %s) AS id,
+			COALESCE(NULLIF(i.brand, ''), %s) AS name,
+			COALESCE(NULLIF(i.brand, ''), %s) AS brand,
+			SUM(mapped.line_value) AS value,
+			SUM(mapped.qty) AS qty
+		FROM (
+			SELECT
+				({case_sql}) AS territory,
+				b.item_code,
+				b.actual_qty AS qty,
+				(b.actual_qty * COALESCE(b.valuation_rate, 0)) AS line_value
+			FROM `tabBin` b
+			INNER JOIN `tabWarehouse` w ON w.name = b.warehouse
+			WHERE {where_sql}
+		) mapped
+		INNER JOIN `tabItem` i ON i.name = mapped.item_code
+		WHERE mapped.territory = %s
+		  AND mapped.line_value != 0
+		GROUP BY COALESCE(NULLIF(i.brand, ''), %s)
+		HAVING SUM(mapped.line_value) > 0
+		ORDER BY value DESC
+		LIMIT %s
+	"""
+	rows = frappe.db.sql(query, params, as_dict=True)
+	has_more = len(rows) > limit
+	rows = rows[:limit]
+	total = sum(float(r.value or 0) for r in rows)
+	out = []
+	for r in rows:
+		v = float(r.value or 0)
+		out.append(
+			{
+				"id": r.id,
+				"name": r.name,
+				"brand": r.brand,
+				"territory": territory,
+				"value": v,
+				"stock_value": v,
+				"qty": float(r.qty or 0),
+				"percentage": _pct(v, total),
+				"pct": _pct(v, total),
+			}
+		)
+	return _envelope(
+		"brand",
+		out,
+		company=company,
+		total_value=total,
+		has_more=has_more,
+		extra_meta={"territory": territory, "limit": limit},
+	)
+
+
 def _level_item_group(
 	company: str,
 	territory: str,
@@ -519,6 +614,8 @@ def _level_item(
 				"name": r.name or r.id,
 				"item_code": r.item_code,
 				"item_name": r.item_name,
+				"territory": territory,
+				"warehouse": warehouse,
 				"value": v,
 				"stock_value": v,
 				"qty": q,
@@ -542,3 +639,183 @@ def _level_item(
 			"limit": limit,
 		},
 	)
+
+
+def _level_item_by_code(
+	company: str,
+	territory: str,
+	item_code: str,
+	brand: Optional[str],
+	wh_scope: Optional[List[str]],
+	limit: int,
+) -> Dict[str, Any]:
+	"""One row per warehouse for a single item within a territory."""
+	case_sql, case_params, _ = _territory_case_sql("w")
+	where_sql, where_params = _bin_base(company, wh_scope)
+	fetch = max(int(limit or 100), 1) + 1
+	params: List[Any] = list(case_params) + list(where_params) + [territory, item_code]
+	brand_sql = ""
+	if brand is not None and str(brand).strip():
+		brand_sql = f" AND COALESCE(NULLIF(i.brand, ''), %s) = %s"
+		params.extend([NO_BRAND, brand])
+	params.append(fetch)
+
+	query = f"""
+		SELECT
+			mapped.warehouse,
+			i.name AS item_code,
+			i.item_name AS name,
+			i.item_name,
+			i.stock_uom AS uom,
+			SUM(mapped.line_value) AS value,
+			SUM(mapped.qty) AS qty
+		FROM (
+			SELECT
+				({case_sql}) AS territory,
+				b.warehouse,
+				b.item_code,
+				b.actual_qty AS qty,
+				(b.actual_qty * COALESCE(b.valuation_rate, 0)) AS line_value
+			FROM `tabBin` b
+			INNER JOIN `tabWarehouse` w ON w.name = b.warehouse
+			WHERE {where_sql}
+		) mapped
+		INNER JOIN `tabItem` i ON i.name = mapped.item_code
+		WHERE mapped.territory = %s
+		  AND mapped.item_code = %s
+		  AND mapped.line_value != 0
+		  {brand_sql}
+		GROUP BY mapped.warehouse, i.name, i.item_name, i.stock_uom
+		HAVING SUM(mapped.line_value) > 0
+		ORDER BY value DESC
+		LIMIT %s
+	"""
+	rows = frappe.db.sql(query, params, as_dict=True)
+	has_more = len(rows) > limit
+	rows = rows[:limit]
+	total = sum(float(r.value or 0) for r in rows)
+	out = []
+	for r in rows:
+		v = float(r.value or 0)
+		q = float(r.qty or 0)
+		out.append(
+			{
+				"id": r.item_code,
+				"name": r.name or r.item_code,
+				"item_code": r.item_code,
+				"item_name": r.item_name,
+				"territory": territory,
+				"warehouse": r.warehouse,
+				"value": v,
+				"stock_value": v,
+				"qty": q,
+				"actual_qty": q,
+				"uom": r.uom,
+				"percentage": _pct(v, total),
+				"pct": _pct(v, total),
+			}
+		)
+	return _envelope(
+		"item",
+		out,
+		company=company,
+		total_value=total,
+		has_more=has_more,
+		extra_meta={
+			"territory": territory,
+			"item_code": item_code,
+			"brand": brand,
+			"limit": limit,
+		},
+	)
+
+
+def get_item_stock_by_code(
+	company: str,
+	item_code: str,
+	*,
+	territory: Optional[str] = None,
+	territories: Optional[str] = None,
+) -> Dict[str, Any]:
+	"""Stock lines for one item (territory × warehouse), with totals."""
+	item_code = (item_code or "").strip()
+	if not item_code:
+		frappe.throw(_("item_code is required"), frappe.ValidationError)
+
+	terr_scope, wh_scope = _resolve_scope(
+		company,
+		territory=territory,
+		territories=territories,
+		warehouse=None,
+	)
+	if wh_scope is not None and len(wh_scope) == 0:
+		return {
+			"item_code": item_code,
+			"item_name": frappe.db.get_value("Item", item_code, "item_name") or item_code,
+			"total_qty": 0.0,
+			"total_value": 0.0,
+			"lines": [],
+			"meta": {"currency": _company_currency(company), "company": company},
+		}
+
+	case_sql, case_params, _ = _territory_case_sql("w")
+	where_sql, where_params = _bin_base(company, wh_scope)
+	params: List[Any] = list(case_params) + list(where_params) + [item_code]
+
+	query = f"""
+		SELECT
+			mapped.territory,
+			mapped.warehouse,
+			SUM(mapped.qty) AS qty,
+			SUM(mapped.line_value) AS value
+		FROM (
+			SELECT
+				({case_sql}) AS territory,
+				b.warehouse,
+				b.item_code,
+				b.actual_qty AS qty,
+				(b.actual_qty * COALESCE(b.valuation_rate, 0)) AS line_value
+			FROM `tabBin` b
+			INNER JOIN `tabWarehouse` w ON w.name = b.warehouse
+			WHERE {where_sql}
+		) mapped
+		WHERE mapped.item_code = %s
+		  AND mapped.territory IS NOT NULL
+		  AND mapped.line_value != 0
+	"""
+	if terr_scope is not None:
+		if not terr_scope:
+			query += " AND 1=0"
+		else:
+			query += " AND mapped.territory IN %s"
+			params.append(tuple(terr_scope))
+	if territory:
+		query += " AND mapped.territory = %s"
+		params.append(territory)
+
+	query += """
+		GROUP BY mapped.territory, mapped.warehouse
+		HAVING SUM(mapped.line_value) > 0
+		ORDER BY value DESC
+	"""
+	rows = frappe.db.sql(query, params, as_dict=True)
+	lines = [
+		{
+			"territory": r.territory,
+			"warehouse": r.warehouse,
+			"qty": float(r.qty or 0),
+			"value": float(r.value or 0),
+		}
+		for r in rows
+	]
+	total_qty = sum(line["qty"] for line in lines)
+	total_value = sum(line["value"] for line in lines)
+	item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
+	return {
+		"item_code": item_code,
+		"item_name": item_name,
+		"total_qty": round(total_qty, 2),
+		"total_value": round(total_value, 2),
+		"lines": lines,
+		"meta": {"currency": _company_currency(company), "company": company},
+	}

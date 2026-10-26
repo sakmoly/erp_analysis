@@ -70,7 +70,13 @@ def _legacy_dimension_specs() -> dict[str, dict[str, Any]]:
 
 DIMENSION_KEY_ALIASES = {
 	"channel": "division",
+	# Mobile drill label "item groups" → SalesDashBoard Sub_Group (no Group column on site).
+	"item_group": "sub_group",
+	"group": "sub_group",
 }
+
+# Logical filter keys for drill/API — not SalesDashBoard analysis dimensions.
+DRILL_ONLY_FILTER_KEYS = frozenset({"sales_order", "customer", "payment_entry"})
 
 
 def _dashboard_join_path(
@@ -101,6 +107,8 @@ def _legacy_dashboard_dimension_specs() -> dict[str, dict[str, Any]]:
 	for key, label, field in (
 		("salesperson", "Salesperson", "Sales_Person"),
 		("division", "Division", "Division"),
+		("sub_group", "Item Group", "Sub_Group"),
+		("brand", "Brand", "Brand"),
 	):
 		specs[key] = {
 			"dimension_key": key,
@@ -223,6 +231,50 @@ def _normalize_analysis_row(row: dict[str, Any]) -> dict[str, Any]:
 	return out
 
 
+def normalize_division_slice_filters(
+	user: str,
+	company: Optional[str],
+	parsed: dict[str, list[Any]],
+) -> dict[str, list[Any]]:
+	"""
+	Mobile drill taps sometimes send `{ \"Retail\": [\"Retail\"] }` instead of
+	`{ \"division\": [\"Retail\"] }`. Rewrite those keys to `division`.
+	"""
+	if not parsed or parsed.get("division") or parsed.get("channel"):
+		return parsed
+
+	known: set[str] = set(DIMENSION_KEY_ALIASES.keys()) | set(DIMENSION_KEY_ALIASES.values())
+	for row in list_effective_dimensions(user, company):
+		key = (row.get("key") or "").strip().lower()
+		if key:
+			known.add(key)
+
+	out: dict[str, list[Any]] = {}
+	division_values: list[Any] = []
+
+	for key, values in parsed.items():
+		k = (key or "").strip().lower()
+		if not values:
+			continue
+		if k in known:
+			out.setdefault(k, []).extend(values)
+			continue
+		if len(values) == 1:
+			val = str(values[0] or "").strip()
+			if val and val.lower() == k:
+				division_values.append(val)
+				continue
+		out.setdefault(k, []).extend(values)
+
+	if division_values:
+		out.setdefault("division", [])
+		for val in division_values:
+			if val not in out["division"]:
+				out["division"].append(val)
+
+	return out if out else parsed
+
+
 def parse_logical_filters(raw: Any) -> dict[str, list[Any]]:
 	if raw is None or raw == "":
 		return {}
@@ -239,7 +291,10 @@ def parse_logical_filters(raw: Any) -> dict[str, list[Any]]:
 			continue
 		if not isinstance(values, (list, tuple)):
 			values = [values]
-		out[(key or "").strip().lower()] = list(values)
+		cleaned = [v for v in values if v is not None and str(v).strip()]
+		if not cleaned:
+			continue
+		out[(key or "").strip().lower()] = cleaned
 	return out
 
 
@@ -252,7 +307,12 @@ def validate_logical_filters(
 	for dim_key, values in (filters or {}).items():
 		if not values:
 			continue
+		key = (dim_key or "").strip().lower()
+		if key in DRILL_ONLY_FILTER_KEYS:
+			continue
 		row = resolve_effective_dimension(user, company, dim_key)
+		if not row.get("dimension_key"):
+			row = {**row, "dimension_key": (dim_key or "").strip().lower()}
 		if not row.get("allow_filter"):
 			frappe.throw(_("Dimension {0} is not filterable").format(dim_key), frappe.ValidationError)
 		_validate_filter_scope(user, company, dim_key, values)

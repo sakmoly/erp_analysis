@@ -42,6 +42,18 @@ def health():
 	}
 
 
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def pwa_password_login(usr: str | None = None, pwd: str | None = None, **kwargs):
+	"""Web PWA login: validate ERPNext credentials and return a mobile-style bearer token."""
+	from erp_analysis.utils.rpc import clean_kwargs
+	from erp_analysis.services.pwa_auth import pwa_password_login as _impl
+
+	clean_kwargs(kwargs)
+	usr = usr or kwargs.get("usr")
+	pwd = pwd or kwargs.get("pwd")
+	return _impl(str(usr or ""), str(pwd or ""))
+
+
 @frappe.whitelist()
 def get_mobile_config(**kwargs):
 	from erp_analysis.utils.rpc import clean_kwargs
@@ -52,13 +64,16 @@ def get_mobile_config(**kwargs):
 
 
 @frappe.whitelist()
-def get_mobile_bootstrap(company: str | None = None, **kwargs):
+def get_mobile_bootstrap(company: str | None = None, hydrate: int | None = None, **kwargs):
 	"""Authenticated mobile bootstrap — profile, modules, dimensions, permissions."""
-	from erp_analysis.utils.rpc import clean_kwargs
+	from erp_analysis.utils.rpc import clean_kwargs, get_arg, to_bool
 	from erp_analysis.services.mobile_bootstrap import build_mobile_bootstrap
 
 	clean_kwargs(kwargs)
-	return build_mobile_bootstrap(company=company)
+	do_hydrate = to_bool(get_arg("hydrate", hydrate), False)
+	board_keys = ("from_date", "to_date", "period", "show_ly", "filters", "territory", "limit")
+	board_request = {k: kwargs[k] for k in board_keys if k in kwargs}
+	return build_mobile_bootstrap(company=company, hydrate=do_hydrate, board_request=board_request)
 
 
 @frappe.whitelist(methods=["GET", "POST"])
@@ -90,6 +105,45 @@ def get_dashboard_widget_data(
 		filters=get_arg("filters", filters),
 		drill_depth=to_int(drill, None) if drill is not None and str(drill).strip() != "" else None,
 		compare=get_arg("compare", compare),
+		**kwargs,
+	)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_sales_by_division_drill(
+	company: str | None = None,
+	period: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	limit: int | None = None,
+	drill_depth: int | None = None,
+	dimension: str | None = None,
+	filters: Any = None,
+	division: Any = None,
+	sub_group: Any = None,
+	**kwargs,
+):
+	"""
+	Sales By drill (Division → sub_group → brand) on tabSalesDashBoard only.
+
+	Prefer this over get_product_performance for the sales overview division widget.
+	"""
+	from erp_analysis.services.sales_drill import get_sales_by_division_drill as _impl
+	from erp_analysis.utils.rpc import clean_kwargs, get_arg, to_int
+
+	clean_kwargs(kwargs)
+	drill = get_arg("drill_depth", drill_depth)
+	return _impl(
+		company=get_arg("company", company),
+		period=get_arg("period", period),
+		from_date=get_arg("from_date", from_date),
+		to_date=get_arg("to_date", to_date),
+		limit=to_int(get_arg("limit", limit), 15),
+		drill_depth=to_int(drill, None) if drill is not None and str(drill).strip() != "" else None,
+		dimension=get_arg("dimension", dimension),
+		filters=get_arg("filters", filters),
+		division=get_arg("division", division),
+		sub_group=get_arg("sub_group", sub_group),
 		**kwargs,
 	)
 
@@ -305,9 +359,14 @@ def _get_my_access(user: str | None = None, company: str | None = None):
 
 	objects = []
 	for row in lines:
+		registry_key = None
+		access_object = row.get("access_object")
+		if access_object:
+			registry_key = frappe.db.get_value("Access Object Registry", access_object, "object_key")
 		objects.append(
 			{
-				"object_key": row.get("access_object") or row.get("object_key"),
+				"access_object": access_object,
+				"object_key": registry_key or access_object or row.get("object_key"),
 				"object_type": row.get("object_type"),
 				"label": row.get("label"),
 				"can_view": bool(row.get("can_view")) if "can_view" in row else False,
@@ -368,6 +427,46 @@ def _store_push_token(
 	return {"ok": True, "name": doc.name}
 
 
+@frappe.whitelist(methods=["GET", "POST"])
+def refresh_sales_dashboard(
+	period: str | None = "daily",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	company: str | None = None,
+	**kwargs,
+):
+	"""
+	Replace ``tabSalesDashBoard`` rows for a date window only (older history is kept).
+
+	period: daily | weekly | monthly | yearly | ytd | last_3_months | custom
+	For ``custom``, pass ``from_date`` and ``to_date`` (YYYY-MM-DD).
+
+	Permission: System Manager, ``allow_view_all_sales``, or Access Profile on this API.
+	"""
+	from erp_analysis.utils.rpc import clean_kwargs, get_arg
+
+	clean_kwargs(kwargs)
+	company = company or get_arg("company")
+	from erp_analysis.services.sales_dashboard_refresh import refresh_sales_dashboard_for_mobile
+
+	return refresh_sales_dashboard_for_mobile(
+		period=period or "daily",
+		from_date=from_date,
+		to_date=to_date,
+		company=company,
+	)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def refresh_sales_dashboard_daily(company: str | None = None, **kwargs):
+	"""Mobile shortcut: refresh today's SalesDashBoard rows (~1s). Same permissions as refresh_sales_dashboard."""
+	from erp_analysis.utils.rpc import clean_kwargs, get_arg
+
+	clean_kwargs(kwargs)
+	company = company or get_arg("company")
+	from erp_analysis.services.sales_dashboard_refresh import refresh_sales_dashboard_for_mobile
+
+	return refresh_sales_dashboard_for_mobile(period="daily", company=company)
 
 
 

@@ -102,7 +102,7 @@ write_mod catalogue.py printechs_utility.catalogue \
   get_catalogues_list get_catalogue_pages get_catalogue_flip_url
 
 write_mod customer_notifications.py printechs_utility.customer_notifications \
-  send_statement_pdf
+  send_statement_pdf get_statement_pdf get_statement_branding
 
 # api.py access helpers — keep health/config; fix get_my_access forwarding
 cat > "$PKG/api.py" <<'EOF'

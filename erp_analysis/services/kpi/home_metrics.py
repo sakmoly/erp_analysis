@@ -17,6 +17,9 @@ from erp_analysis.services.payables import get_payables_summary
 from erp_analysis.services.purchase import get_purchase_summary
 from erp_analysis.services.sales_period import resolve_comparison_dates, resolve_period_dates, variance_block
 
+HOME_KPI_CACHE_TTL = 120
+HOME_KPI_CACHE_VERSION = 1
+
 HOME_KPI_METRICS = frozenset(
 	{
 		"gross_profit",
@@ -300,6 +303,13 @@ def _current_ratio_kpi(company: Optional[str]) -> dict[str, Any]:
 	return _kpi_result(metric="current_ratio", label="Current Ratio", value=value, fmt="decimal")
 
 
+def _gl_net_profit_total(company: Optional[str], from_date: date, to_date: date) -> float:
+	"""Period net profit from GL (Income − Expense), aligned with ERPNext P&L."""
+	income = _gl_income_total(company, from_date, to_date)
+	expense = _gl_expense_total(company, from_date, to_date)
+	return round(income - expense, 2)
+
+
 def _net_profit_kpi(
 	*,
 	company: Optional[str],
@@ -308,21 +318,14 @@ def _net_profit_kpi(
 	to_date: Optional[str],
 	compare: Optional[str] = None,
 ) -> dict[str, Any]:
-	"""Net profit = sales-based gross profit minus non-COGS operating expenses (GL)."""
+	"""Net profit = GL Income − GL Expense for the period (same basis as ERPNext P&L)."""
 	start, end, period_key = resolve_period_dates(from_date, to_date, period=period)
-	gp_result = _gross_profit_kpi(company=company, period=period, compare=None, to_date=to_date)
-	gp = float(gp_result.get("value") or 0)
-	opex = _gl_operating_expense_total(company, start, end)
-	value = round(gp - opex, 2)
+	value = _gl_net_profit_total(company, start, end)
 
 	value_ly = None
 	if compare:
 		comp_start, comp_end = resolve_comparison_dates(start, end, compare, period_key=period_key)
-		territories = resolve_territory_scope(company=company, purpose="view", module="sales")
-		ly_sales, ly_cogs = _sales_and_cogs(company, comp_start, comp_end, territories)
-		ly_gp = round(float(ly_sales or 0) - float(ly_cogs or 0), 2)
-		ly_opex = _gl_operating_expense_total(company, comp_start, comp_end)
-		value_ly = round(ly_gp - ly_opex, 2)
+		value_ly = _gl_net_profit_total(company, comp_start, comp_end)
 
 	return _kpi_result(metric="net_profit", label="Net Profit", value=value, value_ly=value_ly)
 
@@ -403,6 +406,38 @@ def _operating_cash_flow_kpi(
 	return _kpi_result(metric="operating_cash_flow", label="Operating Cash Flow", value=value)
 
 
+def _home_kpi_cache_key(
+	*,
+	company: Optional[str],
+	metric: str,
+	widget_key: str,
+	period: str,
+	compare: Optional[str],
+	from_date: Optional[str],
+	to_date: Optional[str],
+) -> str:
+	return (
+		f"home_kpi:v{HOME_KPI_CACHE_VERSION}:{company or ''}:{metric}:{widget_key}:"
+		f"{period}:{compare or ''}:{from_date or ''}:{to_date or ''}"
+	)
+
+
+def _home_kpi_is_cacheable(metric: str, widget_key: str) -> bool:
+	key = (widget_key or "").strip().lower()
+	if metric in ("current_ratio", "net_profit", "operating_cash_flow"):
+		return True
+	if metric == "health_score":
+		return True
+	if key in (
+		"home_total_purchases_kpi",
+		"home_total_payables_kpi",
+		"home_gross_profit_kpi",
+		"home_gp_margin_kpi",
+	):
+		return True
+	return False
+
+
 def get_home_kpi(
 	*,
 	user: str,
@@ -419,63 +454,84 @@ def get_home_kpi(
 	metric = (metric_key or "").strip().lower()
 	widget_key = (widget_key or "").strip().lower()
 
-	if metric == "health_score":
-		return _health_score(company=company, module_key=module_key, widget_key=widget_key)
-
-	if widget_key == "home_total_purchases_kpi":
-		return _total_purchases_kpi(
+	cache_key = None
+	if company and _home_kpi_is_cacheable(metric, widget_key):
+		cache_key = _home_kpi_cache_key(
 			company=company,
-			period=period,
-			compare=compare,
-			from_date=from_date,
-			to_date=to_date,
-		)
-
-	if widget_key == "home_total_payables_kpi" or metric in ("total_payable", "total_payables"):
-		kpis = get_payables_summary(company=company)
-		return _kpi_result(metric="total_payable", label="Total Payables", value=float(kpis.get("total") or 0))
-
-	if metric in ("gross_profit",):
-		return _gross_profit_kpi(company=company, period=period, compare=compare, to_date=to_date)
-
-	if metric in ("gp_pct", "gross_profit_pct"):
-		return _gp_pct_kpi(company=company, period=period, compare=compare, to_date=to_date)
-
-	if metric in ("total_purchases", "purchases_ytd"):
-		return _total_purchases_kpi(
-			company=company,
-			period=period,
-			compare=compare,
-			from_date=from_date,
-			to_date=to_date,
-		)
-
-	if metric in ("open_po_value", "open_value"):
-		kpis = get_purchase_summary(company=company)
-		return _kpi_result(
 			metric=metric,
-			label="Open PO Value",
-			value=float(kpis.get("open_value") or 0),
-		)
-
-	if metric == "current_ratio":
-		return _current_ratio_kpi(company)
-
-	if metric == "net_profit":
-		return _net_profit_kpi(
-			company=company,
+			widget_key=widget_key,
 			period=period,
-			from_date=from_date,
-			to_date=to_date,
 			compare=compare,
-		)
-
-	if metric == "operating_cash_flow":
-		return _operating_cash_flow_kpi(
-			company=company,
-			period=period,
 			from_date=from_date,
 			to_date=to_date,
 		)
+		cached = frappe.cache().get_value(cache_key)
+		if cached:
+			return cached
 
-	frappe.throw(f"Unsupported home KPI metric: {metric_key}")
+	def _compute() -> dict[str, Any]:
+		if metric == "health_score":
+			return _health_score(company=company, module_key=module_key, widget_key=widget_key)
+
+		if widget_key == "home_total_purchases_kpi":
+			return _total_purchases_kpi(
+				company=company,
+				period=period,
+				compare=compare,
+				from_date=from_date,
+				to_date=to_date,
+			)
+
+		if widget_key == "home_total_payables_kpi" or metric in ("total_payable", "total_payables"):
+			kpis = get_payables_summary(company=company)
+			return _kpi_result(metric="total_payable", label="Total Payables", value=float(kpis.get("total") or 0))
+
+		if metric in ("gross_profit",):
+			return _gross_profit_kpi(company=company, period=period, compare=compare, to_date=to_date)
+
+		if metric in ("gp_pct", "gross_profit_pct"):
+			return _gp_pct_kpi(company=company, period=period, compare=compare, to_date=to_date)
+
+		if metric in ("total_purchases", "purchases_ytd"):
+			return _total_purchases_kpi(
+				company=company,
+				period=period,
+				compare=compare,
+				from_date=from_date,
+				to_date=to_date,
+			)
+
+		if metric in ("open_po_value", "open_value"):
+			kpis = get_purchase_summary(company=company)
+			return _kpi_result(
+				metric=metric,
+				label="Open PO Value",
+				value=float(kpis.get("open_value") or 0),
+			)
+
+		if metric == "current_ratio":
+			return _current_ratio_kpi(company)
+
+		if metric == "net_profit":
+			return _net_profit_kpi(
+				company=company,
+				period=period,
+				from_date=from_date,
+				to_date=to_date,
+				compare=compare,
+			)
+
+		if metric == "operating_cash_flow":
+			return _operating_cash_flow_kpi(
+				company=company,
+				period=period,
+				from_date=from_date,
+				to_date=to_date,
+			)
+
+		frappe.throw(f"Unsupported home KPI metric: {metric_key}")
+
+	result = _compute()
+	if cache_key:
+		frappe.cache().set_value(cache_key, result, expires_in_sec=HOME_KPI_CACHE_TTL)
+	return result

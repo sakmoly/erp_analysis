@@ -35,7 +35,7 @@ def get_receivables_summary_kpis(
 			SELECT COALESCE(SUM(outstanding_amount), 0)
 			FROM `tabSales Invoice`
 			WHERE docstatus = 1
-			  AND outstanding_amount > 0
+			  AND outstanding_amount != 0
 			  AND company = %s
 			  {terr_sql}
 			""",
@@ -50,7 +50,7 @@ def get_receivables_summary_kpis(
 			SELECT COALESCE(SUM(outstanding_amount), 0)
 			FROM `tabSales Invoice`
 			WHERE docstatus = 1
-			  AND outstanding_amount > 0
+			  AND outstanding_amount != 0
 			  AND due_date < CURDATE()
 			  AND company = %s
 			  {terr_sql}
