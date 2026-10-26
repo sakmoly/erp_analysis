@@ -100,6 +100,67 @@ def get_payables_aging_buckets(company: Optional[str] = None) -> dict[str, float
 	}
 
 
+def get_open_payables_invoices(
+	company: Optional[str] = None,
+	*,
+	supplier: Optional[str] = None,
+	limit: int = 500,
+) -> list[dict[str, Any]]:
+	"""Open Purchase Invoice lines for payables drill (supplier detail on mobile)."""
+	where, params = _open_pi_where(company)
+	supplier_sql = ""
+	if supplier and str(supplier).strip():
+		supplier_sql = " AND pi.supplier = %s"
+		params = [*params, str(supplier).strip()]
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT
+			pi.name AS invoice,
+			pi.name AS purchase_invoice,
+			pi.supplier,
+			COALESCE(pi.supplier_name, pi.supplier) AS supplier_name,
+			pi.posting_date,
+			pi.due_date,
+			COALESCE(pi.outstanding_amount, 0) AS outstanding,
+			COALESCE(pi.outstanding_amount, 0) AS outstanding_amount,
+			COALESCE(pi.grand_total, 0) AS grand_total,
+			COALESCE(pi.bill_no, '') AS bill_no,
+			CASE
+				WHEN pi.due_date IS NULL THEN 0
+				WHEN pi.due_date >= CURDATE() THEN 0
+				ELSE DATEDIFF(CURDATE(), pi.due_date)
+			END AS days_overdue
+		FROM `tabPurchase Invoice` pi
+		WHERE {where}
+		{supplier_sql}
+		ORDER BY pi.due_date ASC, pi.outstanding_amount DESC
+		LIMIT %s
+		""",
+		tuple([*params, int(limit)]),
+		as_dict=True,
+	)
+
+	out: list[dict[str, Any]] = []
+	for row in rows:
+		out.append(
+			{
+				"invoice": row.invoice,
+				"purchase_invoice": row.purchase_invoice,
+				"supplier": row.supplier,
+				"supplier_name": row.supplier_name,
+				"posting_date": str(row.posting_date) if row.posting_date else None,
+				"due_date": str(row.due_date) if row.due_date else None,
+				"outstanding": round(float(row.outstanding or 0), 2),
+				"outstanding_amount": round(float(row.outstanding_amount or 0), 2),
+				"grand_total": round(float(row.grand_total or 0), 2),
+				"bill_no": row.bill_no or None,
+				"days_overdue": int(row.days_overdue or 0),
+			}
+		)
+	return out
+
+
 def get_payables_by_supplier(
 	company: Optional[str] = None,
 	limit: int = 20,
@@ -141,6 +202,10 @@ def get_payables_by_supplier(
 def get_payables_dashboard_payload(
 	company: Optional[str] = None,
 	limit: int = 20,
+	*,
+	supplier: Optional[str] = None,
+	include_invoices: bool = True,
+	invoice_limit: int = 500,
 ) -> dict[str, Any]:
 	summary = get_payables_summary(company=company)
 	where, params = _open_pi_where(company)
@@ -155,14 +220,45 @@ def get_payables_dashboard_payload(
 		as_dict=True,
 	)[0]
 
-	return {
+	invoices: list[dict[str, Any]] = []
+	if include_invoices:
+		invoices = get_open_payables_invoices(
+			company,
+			supplier=supplier,
+			limit=invoice_limit,
+		)
+
+	payload: dict[str, Any] = {
 		"kpis": {
 			**summary,
 			"invoice_count": int(extra.invoice_count or 0),
 		},
 		"aging_buckets": get_payables_aging_buckets(company=company),
 		"by_supplier": get_payables_by_supplier(company=company, limit=limit),
+		"invoices": invoices,
+		"open_invoices": invoices,
 	}
+	if supplier and str(supplier).strip():
+		payload["supplier"] = str(supplier).strip()
+		matched = [row for row in payload["by_supplier"] if row.get("supplier") == payload["supplier"]]
+		if matched:
+			payload["supplier_summary"] = matched[0]
+		elif invoices:
+			payload["supplier_summary"] = {
+				"supplier": payload["supplier"],
+				"supplier_name": invoices[0].get("supplier_name") or payload["supplier"],
+				"outstanding": round(sum(float(i.get("outstanding") or 0) for i in invoices), 2),
+				"overdue": round(
+					sum(
+						float(i.get("outstanding") or 0)
+						for i in invoices
+						if int(i.get("days_overdue") or 0) > 0
+					),
+					2,
+				),
+				"invoice_count": len(invoices),
+			}
+	return payload
 
 
 def get_payment_planning_payload(
