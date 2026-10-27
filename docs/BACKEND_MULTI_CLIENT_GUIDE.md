@@ -65,7 +65,7 @@ Known method names: see `mobile_config.KNOWN_API_METHODS` in code.
 
 ## 5. Checklist per site
 
-- [ ] `install_erp_analysis.sh` + `bench migrate` (creates **tabSalesDashBoard** + mobile DocTypes via patches/hooks)
+- [ ] `install_erp_analysis.sh` + `bench migrate` (creates **tabSalesDashBoard**, mobile DocTypes, and Desk workspace **ERP Analysis** via patches/hooks)
 - [ ] If **`ViewSalesGrossProfit`** exists: run SDB data refresh (`erp_analysis.patches.setup_sales_dashboard_from_si.refresh_sales_dashboard` or `frappeauth_app` `regenerate_all`)
 - [ ] OAuth Password grant + `client_id`
 - [ ] Mobile App Settings configured

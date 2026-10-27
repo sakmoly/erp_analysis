@@ -1,0 +1,158 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"ea_hdr\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Mobile &amp; access</b></span>\",\"col\":12}},{\"id\":\"ea_s1\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Mobile App Settings\",\"col\":3}},{\"id\":\"ea_s2\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Mobile App Profile\",\"col\":3}},{\"id\":\"ea_s3\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Access Profile\",\"col\":3}},{\"id\":\"ea_s4\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Access Object Registry\",\"col\":3}},{\"id\":\"ea_sp\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"ea_hdr2\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Catalogue &amp; tokens</b></span>\",\"col\":12}},{\"id\":\"ea_c1\",\"type\":\"card\",\"data\":{\"card_name\":\"All DocTypes\",\"col\":4}}]",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "chart",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "ERP Analysis",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "All DocTypes",
+   "link_count": 0,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Mobile App Settings",
+   "link_count": 0,
+   "link_to": "Mobile App Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Mobile App Profile",
+   "link_count": 0,
+   "link_to": "Mobile App Profile",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Mobile App Dashboard",
+   "link_count": 0,
+   "link_to": "Mobile App Dashboard",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Mobile Dashboard Widget",
+   "link_count": 0,
+   "link_to": "Mobile Dashboard Widget",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Mobile App Module",
+   "link_count": 0,
+   "link_to": "Mobile App Module",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Mobile Analysis Dimension",
+   "link_count": 0,
+   "link_to": "Mobile Analysis Dimension",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Access Profile",
+   "link_count": 0,
+   "link_to": "Access Profile",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Access Object Registry",
+   "link_count": 0,
+   "link_to": "Access Object Registry",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "E Catalogue",
+   "link_count": 0,
+   "link_to": "E Catalogue",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Mobile Push Token",
+   "link_count": 0,
+   "link_to": "Mobile Push Token",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "module": "ERP Analysis",
+ "name": "ERP Analysis",
+ "number_cards": [],
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [],
+ "sequence_id": 20.0,
+ "shortcuts": [
+  {
+   "color": "Blue",
+   "label": "Mobile App Settings",
+   "link_to": "Mobile App Settings",
+   "type": "DocType"
+  },
+  {
+   "color": "Green",
+   "label": "Mobile App Profile",
+   "link_to": "Mobile App Profile",
+   "type": "DocType"
+  },
+  {
+   "color": "Orange",
+   "label": "Access Profile",
+   "link_to": "Access Profile",
+   "type": "DocType"
+  },
+  {
+   "color": "Grey",
+   "label": "Access Object Registry",
+   "link_to": "Access Object Registry",
+   "type": "DocType"
+  }
+ ],
+ "title": "ERP Analysis"
+}
