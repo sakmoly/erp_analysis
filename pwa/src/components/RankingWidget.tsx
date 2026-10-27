@@ -8,7 +8,25 @@ type Props = {
   onRowDrill?: (point: { label: string; dimension_value?: string }) => void;
 };
 
+function displayAmount(
+  row: Record<string, unknown>,
+  value: number | null,
+  defaultFmt: string,
+): string {
+  const pre = row.value_display ?? row.collected_display ?? row.formatted_value;
+  if (typeof pre === "string" && pre.trim()) return pre;
+  const fmt = String(row.format ?? defaultFmt ?? "currency_compact");
+  if (value == null || Number.isNaN(value)) return "—";
+  return formatCompact(value, fmt);
+}
+
 export function RankingWidget({ widget, onRowTap, onRowDrill }: Props) {
+  const defaultFmt = String(
+    widget.meta?.format ||
+      widget.kpi?.format ||
+      (widget.data as { format?: string } | undefined)?.format ||
+      "currency_compact",
+  );
   const dim = (
     widget.chart?.dimension ||
     widget.meta?.dimension ||
@@ -56,7 +74,7 @@ export function RankingWidget({ widget, onRowTap, onRowDrill }: Props) {
                 >
                   <span className="rank-label">{label}</span>
                   <span className="rank-value">
-                    {p.value != null ? formatCompact(Number(p.value), "currency_compact") : "—"}
+                    {displayAmount(p as Record<string, unknown>, p.value ?? null, defaultFmt)}
                   </span>
                 </li>
               );
@@ -133,7 +151,7 @@ export function RankingWidget({ widget, onRowTap, onRowDrill }: Props) {
             >
               <span className="rank-label">{label}</span>
               <span className="rank-value">
-                {metric != null ? formatCompact(metric, "currency_compact") : "—"}
+                {displayAmount(row, metric, defaultFmt)}
               </span>
             </li>
           );

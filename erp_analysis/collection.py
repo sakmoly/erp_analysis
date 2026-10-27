@@ -10,6 +10,7 @@ from erp_analysis.access_context import guard_mobile_api
 from erp_analysis.services.collection import (
 	get_collection_attention_payload,
 	get_collection_dashboard_payload,
+	get_collection_payments_payload,
 	get_customer_advances_by_customer,
 	get_customer_advances_chart_series,
 	get_customer_advances_summary,
@@ -45,13 +46,17 @@ def get_collection_dashboard(
 	limit = _to_int(_get_arg("limit", limit), 20)
 
 	try:
-		return get_collection_dashboard_payload(
-			company=company,
-			from_date=from_date,
-			to_date=to_date,
-			territory=territory,
-			limit=limit,
-			territories=territories,
+		from erp_analysis.services.collection_mobile import enrich_collection_dashboard_for_mobile
+
+		return enrich_collection_dashboard_for_mobile(
+			get_collection_dashboard_payload(
+				company=company,
+				from_date=from_date,
+				to_date=to_date,
+				territory=territory,
+				limit=limit,
+				territories=territories,
+			)
 		)
 	except Exception:
 		frappe.log_error(title="collection.get_collection_dashboard", message=frappe.get_traceback())
@@ -60,6 +65,66 @@ def get_collection_dashboard(
 			"period": {"from_date": from_date, "to_date": to_date},
 			"by_territory": [],
 			"by_customer": [],
+		}
+
+
+@frappe.whitelist(methods=["GET", "POST"], allow_guest=False)
+def get_collection_payments(
+	company: Optional[str] = None,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	period: Optional[str] = None,
+	breakdown_type: Optional[str] = None,
+	breakdown_id: Optional[str] = None,
+	payment_entry: Optional[str] = None,
+	limit: Optional[int] = None,
+	territory: Optional[str] = None,
+):
+	"""
+	Collection drill — Receive Payment Entry list for a territory / salesperson / customer slice.
+
+	Single payment detail: pass ``payment_entry`` (optional ``breakdown_*`` for context).
+	"""
+	ctx = guard_mobile_api(
+		company=company,
+		module_key="collection",
+		scope_module="sales",
+		territory=territory,
+		object_key="erp_analysis.collection.get_collection_payments",
+	)
+	company = ctx["company"]
+	territories = ctx["view_territory_scope"]
+	limit = _to_int(_get_arg("limit", limit), 500)
+
+	try:
+		from erp_analysis.services.collection_mobile import enrich_collection_payments_for_mobile
+
+		return enrich_collection_payments_for_mobile(
+			get_collection_payments_payload(
+				company=company,
+				from_date=_get_arg("from_date", from_date),
+				to_date=_get_arg("to_date", to_date),
+				period=_get_arg("period", period),
+				breakdown_type=_get_arg("breakdown_type", breakdown_type),
+				breakdown_id=_get_arg("breakdown_id", breakdown_id),
+				payment_entry=_get_arg("payment_entry", payment_entry),
+				limit=limit,
+				territories=territories,
+			)
+		)
+	except frappe.ValidationError:
+		raise
+	except Exception:
+		frappe.log_error(title="collection.get_collection_payments", message=frappe.get_traceback())
+		return {
+			"meta": {
+				"currency": "SAR",
+				"company": company,
+				"total_collected": 0,
+				"payment_count": 0,
+			},
+			"summary": {"collected": 0, "payment_count": 0},
+			"items": [],
 		}
 
 

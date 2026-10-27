@@ -397,7 +397,7 @@ RECEIVABLES_PHASE2_WIDGETS: list[dict[str, Any]] = [
 		"config_json": _row_config(
 			"Collection Summary",
 			"receivables_collection_r1",
-			format="currency_compact",
+			format="currency_integer",
 			kpi_id="collected_mtd",
 		),
 		"enabled": 1,
@@ -415,7 +415,7 @@ RECEIVABLES_PHASE2_WIDGETS: list[dict[str, Any]] = [
 		"config_json": _row_config(
 			"Collection Summary",
 			"receivables_collection_r1",
-			format="currency_compact",
+			format="currency_integer",
 			kpi_id="collected_ytd",
 		),
 		"enabled": 1,

@@ -143,6 +143,10 @@ export function widgetFormat(w: WidgetPayload): string {
 }
 
 export function formatCompact(value: number, fmt: string): string {
+  if (fmt === "currency_integer") {
+    const n = Math.round(value);
+    return `SAR ${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+  }
   if (fmt === "currency_compact") {
     const abs = Math.abs(value);
     if (abs >= 1_000_000) return `SAR ${(value / 1_000_000).toFixed(2)}M`;

@@ -354,9 +354,19 @@ def _collection_kpi(
 
 	kpis = get_collection_period_kpis(company=company)
 	if metric in ("collected_mtd", "collection_mtd") or (metric == "collected" and period == "mtd"):
-		return _kpi_result(metric=metric, label="Collected MTD", value=kpis.get("mtd") or 0)
+		return _kpi_result(
+			metric=metric,
+			label="Collected MTD",
+			value=kpis.get("mtd") or 0,
+			fmt="currency_integer",
+		)
 	if metric in ("collected_ytd", "collection_ytd") or (metric == "collected" and period == "ytd"):
-		return _kpi_result(metric=metric, label="Collected YTD", value=kpis.get("ytd") or 0)
+		return _kpi_result(
+			metric=metric,
+			label="Collected YTD",
+			value=kpis.get("ytd") or 0,
+			fmt="currency_integer",
+		)
 	if metric == "collection_efficiency":
 		perf = _receivables_performance(company)
 		return _kpi_result(

@@ -22,10 +22,12 @@ app_license = "mit"
 # Installation
 # ------------
 # before_install = "erp_analysis.install.before_install"
-# after_install / after_migrate can hang under some lock conditions; run oauth_setup manually:
+# after_install / after_migrate: OAuth + SalesDashBoard table (idempotent).
+# If migrate hangs on locks, run manually:
 #   bench --site <site> execute erp_analysis.oauth_setup.ensure_oauth_client
-# after_install = "erp_analysis.install.after_install"
-# after_migrate = "erp_analysis.install.after_migrate"
+#   bench --site <site> execute erp_analysis.patches.ensure_sales_dashboard_table.execute
+after_install = "erp_analysis.install.after_install"
+after_migrate = "erp_analysis.install.after_migrate"
 
 doc_events = {
 	"E Catalogue": {

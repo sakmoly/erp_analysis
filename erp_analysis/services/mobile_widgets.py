@@ -25,7 +25,7 @@ LEGACY_WIDGET_TYPES = frozenset({"LIST", "MATRIX"})
 NAV_WIDGET_TYPES = frozenset({"LINK"})
 
 BOARD_DATA_CACHE_TTL = 180
-BOARD_DATA_CACHE_VERSION = 37
+BOARD_DATA_CACHE_VERSION = 38
 LEGACY_WIDGET_CACHE_TTL = 120
 LEGACY_WIDGET_CACHE_VERSION = 1
 _LEGACY_WIDGET_CACHE_KEYS = frozenset(
@@ -1696,6 +1696,12 @@ def _customer_widget_payload(
 	}
 
 
+def _format_currency_integer(value: Any, currency: str = "SAR") -> str:
+	from frappe.utils import fmt_money
+
+	return fmt_money(float(value or 0), currency=currency or "SAR", precision=0)
+
+
 def _format_currency_compact(value: Any) -> str:
 	num = float(value or 0)
 	if abs(num) >= 1_000_000:
@@ -1703,6 +1709,15 @@ def _format_currency_compact(value: Any) -> str:
 	if abs(num) >= 1_000:
 		return f"{num / 1_000:.2f}K"
 	return f"{num:.2f}"
+
+
+def _format_widget_amount(value: Any, fmt: str, *, currency: str = "SAR") -> str:
+	f = (fmt or "").strip().lower()
+	if f == "currency_integer":
+		return _format_currency_integer(value, currency)
+	if f == "currency_compact":
+		return _format_currency_compact(value)
+	return str(value)
 
 
 def _attention_widget_payload(
@@ -1935,6 +1950,10 @@ def _build_kpi_widget_response(
 			"row_group": config.get("row_group"),
 		},
 	}
+	if (format_hint or "").strip().lower() == "currency_integer" and value is not None:
+		display = _format_currency_integer(value)
+		result["kpi"]["value_display"] = display
+		result["data"]["value_display"] = display
 	if config.get("section_title"):
 		result["section_title"] = config.get("section_title")
 	if config.get("row_group"):
@@ -2557,6 +2576,8 @@ def _default_format_for_metric(metric: str) -> str:
 		return "percent"
 	if metric in ("turnover", "inventory_turnover"):
 		return "decimal"
+	if metric in ("collected_mtd", "collected_ytd", "collection_mtd", "collection_ytd"):
+		return "currency_integer"
 	if metric in (
 		"net_sales",
 		"gross_sales",
@@ -2712,7 +2733,14 @@ def _legacy_series_from_payload(payload: Any, config: dict[str, Any]) -> list[di
 		amount = round(float(value or 0), 2)
 		if amount < min_value:
 			continue
-		out.append({"label": str(label), "value": amount})
+		point: dict[str, Any] = {"label": str(label), "value": amount}
+		if row.get("value_display"):
+			point["value_display"] = row.get("value_display")
+		if row.get("format"):
+			point["format"] = row.get("format")
+		if row.get("amount_basis"):
+			point["amount_basis"] = row.get("amount_basis")
+		out.append(point)
 
 	sort_by = (config.get("sort_by") or "").strip().lower()
 	if sort_by in ("value_desc", "desc", "value"):

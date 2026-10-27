@@ -37,6 +37,7 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	# Collection
 	("erp_analysis.collection.get_collection_dashboard", "Collection Dashboard"),
 	("erp_analysis.collection.get_collection_attention", "Collection Attention"),
+	("erp_analysis.collection.get_collection_payments", "Collection Payment Entries"),
 	("erp_analysis.collection.get_customer_advances", "Customer Advances"),
 	("erp_analysis.collection.get_customer_advances_customers_chart", "Customer Advances Ranking"),
 	# Receivables

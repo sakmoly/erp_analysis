@@ -30,7 +30,7 @@ from erp_analysis.services.mobile_profile import (
 	sanitize_widget_for_bootstrap,
 )
 
-BOOTSTRAP_SCHEMA_VERSION = 8
+BOOTSTRAP_SCHEMA_VERSION = 9
 
 # Optional bootstrap hydrate: only primary boards (layout-only boot is default).
 _BOOTSTRAP_HYDRATED_BOARDS = frozenset({"home", "sales_overview"})
@@ -162,6 +162,13 @@ def _build_capabilities(
 		"allow_view_all_stock": bool(scope.get("allow_view_all_stock")),
 		"allow_all_receivable": bool(scope.get("allow_all_receivable")),
 		"can_refresh_sales_dashboard": user_can_refresh_sales_dashboard(user, company),
+		"collection": {
+			"amount_format": "currency_integer",
+			"amount_basis": "gl_net",
+			"summary_amount_field": "collected_display",
+			"line_amount_field": "paid_amount_display",
+			"mode_totals_field": "mode_totals",
+		},
 	}
 
 

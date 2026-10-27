@@ -123,11 +123,17 @@ def _add_unique_index() -> None:
 
 def execute(refresh: bool = False):
 	"""Patch entry: schema + view; optional full refresh (run regenerate_all separately)."""
-	if not frappe.db.table_exists("SalesDashBoard"):
-		return {"ok": False, "reason": "SalesDashBoard table missing"}
+	from erp_analysis.patches.ensure_sales_dashboard_table import ensure_sales_dashboard_table
+
+	ensure = ensure_sales_dashboard_table(apply_view=True)
+	if not ensure.get("ok"):
+		return ensure
 
 	_apply_schema()
-	_create_view()
+	try:
+		_create_view()
+	except Exception:
+		frappe.log_error(title="setup_sales_dashboard_from_si view", message=frappe.get_traceback())
 
 	result = {"ok": True, "view": VIEW, "refreshed": False, "unique_index": False}
 

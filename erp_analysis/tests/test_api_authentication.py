@@ -15,6 +15,7 @@ class TestApiAuthentication(FrappeTestCase):
 		"erp_analysis.payables.get_payables_dashboard",
 		"erp_analysis.profitability.get_gross_profit_dashboard",
 		"erp_analysis.collection.get_collection_dashboard",
+		"erp_analysis.collection.get_collection_payments",
 		"erp_analysis.analytics.get_dimensions",
 		"erp_analysis.api.get_mobile_bootstrap",
 		"erp_analysis.api.get_dashboard_widget_data",

@@ -47,6 +47,7 @@ KNOWN_API_METHODS = (
 	"get_executive_dashboard",
 	"get_collection_dashboard",
 	"get_collection_attention",
+	"get_collection_payments",
 	"get_customer_advances",
 	"get_customer_advances_customers_chart",
 	"get_salesperson_ranking",
