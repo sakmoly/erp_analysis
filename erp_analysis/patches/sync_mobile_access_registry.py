@@ -16,6 +16,8 @@ MOBILE_API_REGISTRY: tuple[tuple[str, str], ...] = (
 	("erp_analysis.dashboard.get_complete_dashboard_data", "Complete Dashboard"),
 	("erp_analysis.dashboard.get_executive_dashboard", "Executive Dashboard (dashboard alias)"),
 	("erp_analysis.executive.get_executive_dashboard", "Executive Dashboard"),
+	("erp_analysis.tax.get_vat_dashboard", "VAT Dashboard (ZATCA output + input)"),
+	("erp_analysis.tax.get_vat_summary", "VAT Dashboard (get_vat_summary alias)"),
 	("erp_analysis.sales_kpis.get_dashboard_kpis", "Dashboard KPIs"),
 	("erp_analysis.sales_kpis.get_sales_dashboard", "Sales Dashboard"),
 	# Sales performance
