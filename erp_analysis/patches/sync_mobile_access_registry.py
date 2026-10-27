@@ -134,9 +134,42 @@ APPROVE_OBJECT_KEYS = frozenset(
 	}
 )
 
+_ACCESS_REGISTRY_SERIES = "AO-"
+
+
+def sync_access_object_registry_naming_series() -> int:
+	"""Align tabSeries with highest existing AO-##### name (fixes DuplicateEntryError on insert)."""
+	max_num = 0
+	for name in frappe.get_all("Access Object Registry", pluck="name"):
+		if not name or not str(name).startswith("AO-"):
+			continue
+		suffix = str(name)[3:]
+		if suffix.isdigit():
+			max_num = max(max_num, int(suffix))
+
+	if not max_num:
+		return 0
+
+	current = frappe.db.get_value("Series", _ACCESS_REGISTRY_SERIES, "current") or 0
+	if int(current) >= max_num:
+		return int(current)
+
+	if frappe.db.exists("Series", _ACCESS_REGISTRY_SERIES):
+		frappe.db.sql(
+			"UPDATE `tabSeries` SET `current` = %s WHERE `name` = %s",
+			(max_num, _ACCESS_REGISTRY_SERIES),
+		)
+	else:
+		frappe.db.sql(
+			"INSERT INTO `tabSeries` (`name`, `current`) VALUES (%s, %s)",
+			(_ACCESS_REGISTRY_SERIES, max_num),
+		)
+	return max_num
+
 
 def ensure_registry_rows() -> dict[str, str]:
 	"""Insert missing Access Object Registry rows. Returns object_key -> registry name."""
+	sync_access_object_registry_naming_series()
 	key_to_name: dict[str, str] = {}
 	for object_key, label in MOBILE_API_REGISTRY:
 		existing = frappe.db.get_value("Access Object Registry", {"object_key": object_key}, "name")
@@ -152,7 +185,20 @@ def ensure_registry_rows() -> dict[str, str]:
 				"is_active": 1,
 			}
 		)
-		doc.insert(ignore_permissions=True)
+		try:
+			doc.insert(ignore_permissions=True)
+		except frappe.DuplicateEntryError:
+			sync_access_object_registry_naming_series()
+			doc = frappe.get_doc(
+				{
+					"doctype": "Access Object Registry",
+					"object_type": "API",
+					"object_key": object_key,
+					"label": label,
+					"is_active": 1,
+				}
+			)
+			doc.insert(ignore_permissions=True)
 		key_to_name[object_key] = doc.name
 	return key_to_name
 

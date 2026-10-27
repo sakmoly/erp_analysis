@@ -41,3 +41,4 @@ erp_analysis.patches.register_statement_branding_api
 erp_analysis.patches.fix_approvals_module_key
 erp_analysis.patches.ensure_payables_mobile_module
 erp_analysis.patches.fix_collection_amount_format
+erp_analysis.patches.fix_access_object_registry_naming_series
